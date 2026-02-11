@@ -65,6 +65,32 @@ Core modules:
 Tests:
 - `tests/` contains unit coverage for envelope rules, security, transports, policy, and swarm convergence behavior.
 
+## Installation
+
+Recommended (isolated CLI install):
+
+```bash
+pipx install "a2a-sdl[full]"
+```
+
+Library/virtualenv install:
+
+```bash
+pip install "a2a-sdl[full]"
+```
+
+Minimal install (core only):
+
+```bash
+pip install a2a-sdl
+```
+
+Useful extras:
+- `a2a-sdl[cbor]` for CBOR codec support
+- `a2a-sdl[schema]` for JSON Schema validation
+- `a2a-sdl[http]` for FastAPI/uvicorn adapter
+- `a2a-sdl[ws]` for websocket transport
+
 ## Quick Start
 
 ```bash
@@ -197,6 +223,27 @@ Swarm behavior notes:
 
 ```bash
 python3 -m unittest discover -s tests -v
+```
+
+## Release (Maintainers)
+
+One-time setup:
+1. Create a PyPI project named `a2a-sdl`.
+2. In PyPI, add a Trusted Publisher for this GitHub repo/workflow.
+3. In GitHub repo settings, create environment `pypi` (optional protection rules).
+
+Automated release:
+1. Bump version in `pyproject.toml`.
+2. Commit and push to `main`.
+3. Create and push a version tag (for example `v0.1.1`):
+   `git tag v0.1.1 && git push origin v0.1.1`
+4. GitHub Actions workflow `.github/workflows/publish-pypi.yml` builds and publishes to PyPI.
+
+Manual local release check:
+```bash
+python -m pip install -U build twine
+python -m build
+python -m twine check dist/*
 ```
 
 ## Notes
