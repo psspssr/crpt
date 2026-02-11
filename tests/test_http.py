@@ -4,6 +4,7 @@ import copy
 import datetime as dt
 import threading
 import time
+import urllib.error
 import urllib.request
 import unittest
 import tempfile
@@ -302,13 +303,20 @@ class HTTPTests(unittest.TestCase):
                 headers={"Content-Type": "application/json", "Accept": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(http_req, timeout=10) as response:
-                raw = response.read()
-            decoded = decode_bytes(raw, encoding="json")
-
-            self.assertEqual(decoded["ct"], "error.v1")
-            self.assertEqual(decoded["payload"]["code"], "BAD_REQUEST")
-            self.assertIn("exceeds max_bytes", decoded["payload"]["message"])
+            try:
+                with urllib.request.urlopen(http_req, timeout=10) as response:
+                    raw = response.read()
+                decoded = decode_bytes(raw, encoding="json")
+                self.assertEqual(decoded["ct"], "error.v1")
+                self.assertEqual(decoded["payload"]["code"], "BAD_REQUEST")
+                self.assertIn("exceeds max_bytes", decoded["payload"]["message"])
+            except urllib.error.URLError as exc:
+                # On some runtimes (notably CPython 3.11), the server may close the
+                # socket immediately after rejecting oversized content-length, and the
+                # client can fail while still writing the body.
+                if isinstance(exc.reason, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+                    return
+                raise
         finally:
             server.shutdown()
             thread.join(timeout=1)
