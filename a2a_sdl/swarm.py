@@ -8,7 +8,6 @@ import subprocess
 import tempfile
 import textwrap
 import threading
-import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -124,8 +123,10 @@ class CodexBuddyServer:
             self._thread.join(timeout=1)
 
     def _handler(self, request: dict[str, Any]) -> dict[str, Any]:
-        payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
-        args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+        payload_any = request.get("payload")
+        payload: dict[str, Any] = payload_any if isinstance(payload_any, dict) else {}
+        args_any = payload.get("args")
+        args: dict[str, Any] = args_any if isinstance(args_any, dict) else {}
 
         message = str(args.get("message", "")).strip()
         goal = str(args.get("goal", "")).strip()

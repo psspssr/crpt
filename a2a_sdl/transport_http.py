@@ -257,7 +257,13 @@ def send_http(
             body = exc.read()
             response_content_type = exc.headers.get("Content-Type") if exc.headers else None
             break
-        except (TimeoutError, urllib.error.URLError) as exc:
+        except (
+            TimeoutError,
+            urllib.error.URLError,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            BrokenPipeError,
+        ) as exc:
             last_network_error = exc
             if attempt >= attempts:
                 raise

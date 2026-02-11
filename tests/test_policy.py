@@ -68,6 +68,36 @@ class SecurityPolicyTests(unittest.TestCase):
         with self.assertRaises(EnvelopeValidationError):
             enforce_request_security(env, policy, ReplayCache())
 
+    def test_enforce_request_security_rejects_revoked_kid(self) -> None:
+        env, policy = self._make_secure_request()
+        policy.revoked_kids = {"did:key:agent-a#sig1"}
+
+        with self.assertRaises(EnvelopeValidationError):
+            enforce_request_security(env, policy, ReplayCache())
+
+    def test_enforce_request_security_supports_allowed_rotation_set(self) -> None:
+        env, policy = self._make_secure_request()
+        policy.required_kid_by_agent = {}
+        policy.allowed_kids_by_agent = {"did:key:agent-a": {"did:key:agent-a#sig1", "did:key:agent-a#sig2"}}
+
+        enforce_request_security(env, policy, ReplayCache())
+
+    def test_enforce_request_security_rejects_kid_outside_rotation_set(self) -> None:
+        env, policy = self._make_secure_request()
+        policy.required_kid_by_agent = {}
+        policy.allowed_kids_by_agent = {"did:key:agent-a": {"did:key:agent-a#sig2"}}
+
+        with self.assertRaises(EnvelopeValidationError):
+            enforce_request_security(env, policy, ReplayCache())
+
+    def test_enforce_request_security_rejects_expired_kid(self) -> None:
+        env, policy = self._make_secure_request()
+        past = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=1)).replace(microsecond=0)
+        policy.kid_not_after = {"did:key:agent-a#sig1": past.isoformat().replace("+00:00", "Z")}
+
+        with self.assertRaises(EnvelopeValidationError):
+            enforce_request_security(env, policy, ReplayCache())
+
 
 if __name__ == "__main__":
     unittest.main()

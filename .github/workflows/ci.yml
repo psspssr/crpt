@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint_and_type:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package + dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[full,dev]"
+
+      - name: Ruff
+        run: ruff check a2a_sdl tests
+
+      - name: Mypy
+        run: mypy a2a_sdl
+
+  tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[full]"
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+  validate_tag_version:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate tag matches pyproject version
+        run: |
+          python - <<'PY'
+          import pathlib, tomllib
+
+          pyproject = pathlib.Path("pyproject.toml")
+          data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+          version = str(data["project"]["version"])
+          ref = "${{ github.ref_name }}"
+          tag = ref[1:] if ref.startswith("v") else ref
+          if tag != version:
+              raise SystemExit(f"Tag version mismatch: tag={tag} pyproject={version}")
+          print(f"Tag and pyproject version match: {version}")
+          PY

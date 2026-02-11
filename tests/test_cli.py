@@ -6,7 +6,7 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from a2a_sdl.cli import _load_handler_spec, main
+from a2a_sdl.cli import _load_handler_spec, _load_key_registry, main
 from a2a_sdl.envelope import build_envelope
 from a2a_sdl.schema import get_builtin_descriptor
 
@@ -209,6 +209,38 @@ class CLITests(unittest.TestCase):
     def test_load_handler_spec_invalid_format(self) -> None:
         with self.assertRaises(ValueError):
             _load_handler_spec("artifact.v1-json:loads")
+
+    def test_load_handler_spec_rejects_untrusted_module_prefix(self) -> None:
+        with self.assertRaises(ValueError):
+            _load_handler_spec(
+                "artifact.v1=json:loads",
+                allowed_module_prefixes=("trusted_pkg",),
+            )
+
+    def test_load_handler_spec_requires_manifest_in_strict_mode(self) -> None:
+        with self.assertRaises(ValueError):
+            _load_handler_spec(
+                "artifact.v1=json:loads",
+                require_manifest=True,
+            )
+
+    def test_load_key_registry_parses_rotation_and_revocation(self) -> None:
+        registry_json = """
+        {
+          "trusted_signing_keys": {"kid-1": "pub1"},
+          "required_kid_by_agent": {"agent-a": "kid-1"},
+          "allowed_kids_by_agent": {"agent-a": ["kid-1", "kid-2"]},
+          "revoked_kids": ["kid-old"],
+          "kid_not_after": {"kid-1": "2099-01-01T00:00:00Z"}
+        }
+        """
+        with tempfile.NamedTemporaryFile("w+", suffix=".json") as tmp:
+            tmp.write(registry_json)
+            tmp.flush()
+            registry = _load_key_registry(tmp.name)
+        self.assertEqual(registry["trusted_signing_keys"]["kid-1"], "pub1")
+        self.assertIn("kid-2", registry["allowed_kids_by_agent"]["agent-a"])
+        self.assertIn("kid-old", registry["revoked_kids"])
 
 
 if __name__ == "__main__":

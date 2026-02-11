@@ -21,6 +21,7 @@ from .security import (
     sign_envelope,
     verify_envelope_signature,
 )
+from .versioning import is_protocol_version_compatible, parse_content_type_version, versioning_payload_metadata
 
 __all__ = [
     "EnvelopeValidationError",
@@ -44,6 +45,9 @@ __all__ = [
     "generate_x25519_keypair",
     "sign_envelope",
     "verify_envelope_signature",
+    "parse_content_type_version",
+    "is_protocol_version_compatible",
+    "versioning_payload_metadata",
 ]
 
 __version__ = "0.1.0"

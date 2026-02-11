@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import time
+from dataclasses import dataclass, field
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -11,9 +13,21 @@ from .constants import DEFAULT_LIMITS, PROTOCOL_VERSION, SUPPORTED_CONTENT_TYPES
 from .envelope import build_envelope, derive_response_trace, make_error_response
 from .schema import get_builtin_descriptor
 from .utils import sha256_prefixed
+from .versioning import versioning_payload_metadata
 
 HandlerFn = Callable[[dict[str, Any]], dict[str, Any]]
 ToolFn = Callable[[dict[str, Any]], Any]
+
+
+@dataclass(slots=True)
+class ToolExecutionPolicy:
+    """Policy guard for tool execution safety."""
+
+    allowed_tools: set[str] = field(default_factory=set)
+    max_args_bytes: int = 4096
+
+    def is_allowed(self, tool_name: str) -> bool:
+        return tool_name in self.allowed_tools
 
 
 class ToolRegistry:
@@ -133,7 +147,8 @@ def make_default_tool_registry() -> ToolRegistry:
 
 def _make_task_handler(tools: list[str]) -> HandlerFn:
     def _handle_task(request: dict[str, Any]) -> dict[str, Any]:
-        payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+        payload_any = request.get("payload")
+        payload: dict[str, Any] = payload_any if isinstance(payload_any, dict) else {}
         state_payload = {
             "base": sha256_prefixed(b""),
             "patch": [
@@ -155,9 +170,15 @@ def _make_task_handler(tools: list[str]) -> HandlerFn:
     return _handle_task
 
 
-def _make_toolcall_handler(tool_registry: ToolRegistry, tools: list[str]) -> HandlerFn:
+def _make_toolcall_handler(
+    tool_registry: ToolRegistry,
+    tools: list[str],
+    *,
+    execution_policy: ToolExecutionPolicy | None = None,
+) -> HandlerFn:
     def _handle_toolcall(request: dict[str, Any]) -> dict[str, Any]:
-        payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+        payload_any = request.get("payload")
+        payload: dict[str, Any] = payload_any if isinstance(payload_any, dict) else {}
         tool_name = payload.get("tool")
         args = payload.get("args")
         call_id = payload.get("call_id", "unknown")
@@ -171,6 +192,10 @@ def _make_toolcall_handler(tool_registry: ToolRegistry, tools: list[str]) -> Han
             logs.append("missing or invalid payload.tool")
         elif not isinstance(args, dict):
             logs.append("missing or invalid payload.args")
+        elif execution_policy is not None and not execution_policy.is_allowed(tool_name):
+            logs.append(f"tool '{tool_name}' denied by execution policy")
+        elif execution_policy is not None and len(json.dumps(args, sort_keys=True)) > execution_policy.max_args_bytes:
+            logs.append(f"tool '{tool_name}' args exceed max_args_bytes")
         elif not tool_registry.has(tool_name):
             logs.append(f"unknown tool '{tool_name}'")
         else:
@@ -211,6 +236,7 @@ def _make_negotiation_handler(tools: list[str]) -> HandlerFn:
             "ask": [],
             "supported_ct": sorted(SUPPORTED_CONTENT_TYPES),
             "available_tools": tools,
+            "versioning": versioning_payload_metadata(),
         }
         return build_envelope(
             msg_type="res",
@@ -226,13 +252,18 @@ def _make_negotiation_handler(tools: list[str]) -> HandlerFn:
     return _handle_negotiation
 
 
-def make_default_handler(*, extra_handlers: Mapping[str, HandlerFn] | None = None, tool_registry: ToolRegistry | None = None) -> HandlerFn:
+def make_default_handler(
+    *,
+    extra_handlers: Mapping[str, HandlerFn] | None = None,
+    tool_registry: ToolRegistry | None = None,
+    tool_execution_policy: ToolExecutionPolicy | None = None,
+) -> HandlerFn:
     registry = tool_registry or make_default_tool_registry()
     tools = registry.names()
     router = ContentTypeRouter(
         {
             "task.v1": _make_task_handler(tools),
-            "toolcall.v1": _make_toolcall_handler(registry, tools),
+            "toolcall.v1": _make_toolcall_handler(registry, tools, execution_policy=tool_execution_policy),
             "negotiation.v1": _make_negotiation_handler(tools),
         }
     )

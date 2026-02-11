@@ -26,6 +26,9 @@ This repository implements:
 - Pluggable request handlers via `a2a serve --handler-spec <ct>=<module>:<callable>`
 - Ingress hardening: oversized `Content-Length` rejected before body read
 - URI-schema hardening: untrusted URI descriptors rejected on HTTP/WS/IPC ingress and transport client preflight
+- Key lifecycle policy support: key rotation sets, revoked key IDs, and per-kid expiry checks
+- Plugin safety controls: deny-by-default tool execution and strict custom handler module/manifest validation
+- Stress and fuzz testing for malformed envelopes and concurrent HTTP load
 
 ## How It Works
 
@@ -137,6 +140,17 @@ a2a serve \
   --audit-log-file /tmp/a2a_audit.log
 ```
 
+Key lifecycle controls (rotation + revocation):
+
+```bash
+# key_registry.json may include:
+# trusted_signing_keys, required_kid_by_agent, allowed_kids_by_agent,
+# revoked_kids, kid_not_after, decrypt_private_keys
+a2a serve \
+  --host 127.0.0.1 --port 8080 \
+  --key-registry-file key_registry.json
+```
+
 Secure sender mode (`enc+sig+replay` auto-applied):
 
 ```bash
@@ -178,10 +192,20 @@ Example custom handler wiring:
 ```bash
 a2a serve \
   --host 127.0.0.1 --port 8080 \
+  --allow-handler-module-prefix myproject.handlers \
   --handler-spec artifact.v1=myproject.handlers:artifact_handler
 ```
 
 `artifact_handler(request)` must return a valid A2A response envelope.
+
+By default, tool execution is deny-by-default in `a2a serve`.
+Allow tools explicitly:
+
+```bash
+a2a serve --allow-tool sys.ping --allow-tool math.add
+```
+
+Use `--unsafe-allow-unmanifested-handlers` only for trusted local development.
 
 ## Security Model
 
@@ -250,6 +274,9 @@ Automated release:
    `git tag v0.1.1 && git push origin v0.1.1`
 4. GitHub Actions workflow `.github/workflows/publish-pypi.yml` builds and publishes to PyPI.
 
+CI hardening workflow:
+- `.github/workflows/ci.yml` runs lint (`ruff`), type checks (`mypy`), unit tests (3.11/3.12), and validates that `v*` tags match `pyproject.toml` version.
+
 Manual local release check:
 ```bash
 python -m pip install -U build twine
@@ -262,3 +289,4 @@ python -m twine check dist/*
 - CBOR support requires `pip install -e .[cbor]`.
 - JSON Schema validation requires `pip install -e .[schema]`.
 - FastAPI server adapter requires `pip install -e .[http]`.
+- Versioning policy details: `docs/versioning-policy.md`.

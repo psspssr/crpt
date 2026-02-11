@@ -11,9 +11,9 @@ import sys
 from typing import Any
 
 from .audit import AuditChain
-from .codec import decode_bytes, encode_bytes
+from .codec import decode_bytes
 from .envelope import build_envelope, validate_envelope
-from .handlers import HandlerFn, make_default_handler
+from .handlers import HandlerFn, ToolExecutionPolicy, make_default_handler
 from .policy import SecurityPolicy
 from .schema import get_builtin_descriptor
 from .security import (
@@ -66,13 +66,55 @@ def main(argv: list[str] | None = None) -> int:
         "--decrypt-keys-file",
         help="JSON object mapping recipient kid -> X25519 private key (PEM or b64)",
     )
+    serve.add_argument(
+        "--key-registry-file",
+        help=(
+            "JSON key registry containing trusted_signing_keys, required_kid_by_agent, "
+            "allowed_kids_by_agent, revoked_kids, kid_not_after"
+        ),
+    )
+    serve.add_argument(
+        "--agent-kids-map-file",
+        help="JSON object mapping from.agent_id -> allowed sec.kid[] rotation set",
+    )
+    serve.add_argument(
+        "--revoked-kids-file",
+        help="JSON array of revoked sec.kid values",
+    )
+    serve.add_argument(
+        "--kid-not-after-file",
+        help="JSON object mapping sec.kid -> RFC3339 timestamp",
+    )
     serve.add_argument("--audit-log-file", help="Append-only audit log path")
     serve.add_argument("--audit-signing-key", help="Ed25519 private key path for signing audit entries")
+    serve.add_argument(
+        "--allow-tool",
+        action="append",
+        default=[],
+        help="Allowlisted builtin tool name for toolcall execution (repeatable). Deny-by-default.",
+    )
+    serve.add_argument(
+        "--max-tool-args-bytes",
+        type=int,
+        default=4096,
+        help="Maximum JSON-serialized bytes for payload.args in toolcall execution",
+    )
     serve.add_argument(
         "--handler-spec",
         action="append",
         default=[],
         help="Custom request handler mapping: <ct>=<module>:<callable>",
+    )
+    serve.add_argument(
+        "--allow-handler-module-prefix",
+        action="append",
+        default=[],
+        help="Trusted module prefix for --handler-spec (repeatable).",
+    )
+    serve.add_argument(
+        "--unsafe-allow-unmanifested-handlers",
+        action="store_true",
+        help="Disable strict HANDLER_MANIFEST validation for custom handlers.",
     )
     serve.set_defaults(func=_cmd_serve)
 
@@ -168,7 +210,11 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         args.secure_required
         or args.trusted_signing_keys_file
         or args.agent_kid_map_file
+        or args.agent_kids_map_file
         or args.decrypt_keys_file
+        or args.key_registry_file
+        or args.revoked_kids_file
+        or args.kid_not_after_file
         or args.allowed_agent
     )
 
@@ -178,11 +224,36 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     security_policy = None
     if secure_policy_enabled:
         try:
-            trusted_signing_keys = (
-                _load_json_map(args.trusted_signing_keys_file) if args.trusted_signing_keys_file else {}
-            )
-            required_kid_by_agent = _load_json_map(args.agent_kid_map_file) if args.agent_kid_map_file else {}
-            decrypt_private_keys = _load_json_map(args.decrypt_keys_file) if args.decrypt_keys_file else {}
+            key_registry = _load_key_registry(args.key_registry_file) if args.key_registry_file else {}
+
+            trusted_signing_keys = dict(key_registry.get("trusted_signing_keys", {}))
+            if args.trusted_signing_keys_file:
+                trusted_signing_keys.update(_load_json_map(args.trusted_signing_keys_file))
+
+            required_kid_by_agent = dict(key_registry.get("required_kid_by_agent", {}))
+            if args.agent_kid_map_file:
+                required_kid_by_agent.update(_load_json_map(args.agent_kid_map_file))
+
+            allowed_kids_by_agent = {
+                key: set(values)
+                for key, values in dict(key_registry.get("allowed_kids_by_agent", {})).items()
+            }
+            if args.agent_kids_map_file:
+                override = _load_json_map_of_lists(args.agent_kids_map_file)
+                for key, values in override.items():
+                    allowed_kids_by_agent[key] = values
+
+            revoked_kids = set(key_registry.get("revoked_kids", set()))
+            if args.revoked_kids_file:
+                revoked_kids.update(_load_json_list(args.revoked_kids_file))
+
+            kid_not_after = dict(key_registry.get("kid_not_after", {}))
+            if args.kid_not_after_file:
+                kid_not_after.update(_load_json_map(args.kid_not_after_file))
+
+            decrypt_private_keys = dict(key_registry.get("decrypt_private_keys", {}))
+            if args.decrypt_keys_file:
+                decrypt_private_keys.update(_load_json_map(args.decrypt_keys_file))
         except Exception as exc:
             print(f"failed to load secure policy files: {exc}", file=sys.stderr)
             return 2
@@ -200,6 +271,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             allowed_agents=set(args.allowed_agent),
             trusted_signing_keys=trusted_signing_keys,
             required_kid_by_agent=required_kid_by_agent,
+            allowed_kids_by_agent=allowed_kids_by_agent,
+            revoked_kids=revoked_kids,
+            kid_not_after=kid_not_after,
             decrypt_private_keys=decrypt_private_keys,
         )
 
@@ -213,15 +287,25 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             return 2
 
     extra_handlers: dict[str, HandlerFn] = {}
+    allowed_prefixes = tuple(dict.fromkeys(["a2a_sdl"] + list(args.allow_handler_module_prefix)))
+    require_manifest = not args.unsafe_allow_unmanifested_handlers
     for spec in args.handler_spec:
         try:
-            ct, handler = _load_handler_spec(spec)
+            ct, handler = _load_handler_spec(
+                spec,
+                allowed_module_prefixes=allowed_prefixes,
+                require_manifest=require_manifest,
+            )
         except Exception as exc:
             print(f"invalid --handler-spec '{spec}': {exc}", file=sys.stderr)
             return 2
         extra_handlers[ct] = handler
 
-    handler = make_default_handler(extra_handlers=extra_handlers)
+    tool_policy = ToolExecutionPolicy(
+        allowed_tools=set(args.allow_tool),
+        max_args_bytes=max(1, int(args.max_tool_args_bytes)),
+    )
+    handler = make_default_handler(extra_handlers=extra_handlers, tool_execution_policy=tool_policy)
 
     server = A2AHTTPServer(
         args.host,
@@ -370,7 +454,15 @@ def _write_text(path: pathlib.Path, value: str) -> None:
     path.write_text(value, encoding="utf-8")
 
 
-def _load_handler_spec(spec: str) -> tuple[str, HandlerFn]:
+_ALLOWED_HANDLER_PERMISSIONS = {"read_payload", "write_response", "emit_metrics"}
+
+
+def _load_handler_spec(
+    spec: str,
+    *,
+    allowed_module_prefixes: tuple[str, ...] | None = None,
+    require_manifest: bool = False,
+) -> tuple[str, HandlerFn]:
     if "=" not in spec:
         raise ValueError("expected format <ct>=<module>:<callable>")
     content_type, target = spec.split("=", 1)
@@ -385,8 +477,15 @@ def _load_handler_spec(spec: str) -> tuple[str, HandlerFn]:
     attr_name = attr_name.strip()
     if not module_name or not attr_name:
         raise ValueError("module and callable must be non-empty")
+    if allowed_module_prefixes:
+        if not any(
+            module_name == prefix or module_name.startswith(f"{prefix}.")
+            for prefix in allowed_module_prefixes
+        ):
+            raise ValueError(f"module '{module_name}' is not in allowed handler prefixes")
 
     module = importlib.import_module(module_name)
+    _validate_handler_manifest(module, content_type=ct, require_manifest=require_manifest)
     handler = getattr(module, attr_name, None)
     if handler is None:
         raise ValueError(f"callable '{attr_name}' not found in module '{module_name}'")
@@ -394,6 +493,33 @@ def _load_handler_spec(spec: str) -> tuple[str, HandlerFn]:
         raise TypeError(f"attribute '{attr_name}' in module '{module_name}' is not callable")
 
     return ct, handler
+
+
+def _validate_handler_manifest(module: Any, *, content_type: str, require_manifest: bool) -> None:
+    manifest = getattr(module, "HANDLER_MANIFEST", None)
+    if manifest is None:
+        if require_manifest:
+            raise ValueError("module must define HANDLER_MANIFEST in strict mode")
+        return
+    if not isinstance(manifest, dict):
+        raise ValueError("HANDLER_MANIFEST must be an object")
+
+    name = manifest.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("HANDLER_MANIFEST.name must be a non-empty string")
+
+    content_types = manifest.get("content_types")
+    if not isinstance(content_types, list) or not all(isinstance(item, str) and item for item in content_types):
+        raise ValueError("HANDLER_MANIFEST.content_types must be a non-empty string array")
+    if content_type not in content_types:
+        raise ValueError(f"HANDLER_MANIFEST.content_types does not include '{content_type}'")
+
+    permissions = manifest.get("permissions", [])
+    if not isinstance(permissions, list) or not all(isinstance(item, str) for item in permissions):
+        raise ValueError("HANDLER_MANIFEST.permissions must be a string array")
+    unknown = sorted(set(permissions) - _ALLOWED_HANDLER_PERMISSIONS)
+    if unknown:
+        raise ValueError(f"HANDLER_MANIFEST has unsupported permissions: {unknown}")
 
 
 def _load_json_map(path: str) -> dict[str, str]:
@@ -408,6 +534,83 @@ def _load_json_map(path: str) -> dict[str, str]:
             raise ValueError(f"{path} must map string->string values")
         result[key] = value
     return result
+
+
+def _load_json_map_of_lists(path: str) -> dict[str, set[str]]:
+    content = pathlib.Path(path).read_text(encoding="utf-8")
+    decoded = json.loads(content)
+    if not isinstance(decoded, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    result: dict[str, set[str]] = {}
+    for key, value in decoded.items():
+        if not isinstance(key, str) or not isinstance(value, list):
+            raise ValueError(f"{path} must map string->string[] values")
+        if not all(isinstance(item, str) and item for item in value):
+            raise ValueError(f"{path} must map string->non-empty string[] values")
+        result[key] = set(value)
+    return result
+
+
+def _load_json_list(path: str) -> list[str]:
+    content = pathlib.Path(path).read_text(encoding="utf-8")
+    decoded = json.loads(content)
+    if not isinstance(decoded, list) or not all(isinstance(item, str) and item for item in decoded):
+        raise ValueError(f"{path} must contain a string array")
+    return decoded
+
+
+def _load_key_registry(path: str) -> dict[str, Any]:
+    content = pathlib.Path(path).read_text(encoding="utf-8")
+    decoded = json.loads(content)
+    if not isinstance(decoded, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+
+    registry: dict[str, Any] = {
+        "trusted_signing_keys": {},
+        "required_kid_by_agent": {},
+        "allowed_kids_by_agent": {},
+        "revoked_kids": set(),
+        "kid_not_after": {},
+        "decrypt_private_keys": {},
+    }
+
+    if "trusted_signing_keys" in decoded:
+        if not isinstance(decoded["trusted_signing_keys"], dict):
+            raise ValueError("trusted_signing_keys must be an object")
+        registry["trusted_signing_keys"] = {
+            str(key): str(value) for key, value in decoded["trusted_signing_keys"].items()
+        }
+    if "required_kid_by_agent" in decoded:
+        if not isinstance(decoded["required_kid_by_agent"], dict):
+            raise ValueError("required_kid_by_agent must be an object")
+        registry["required_kid_by_agent"] = {
+            str(key): str(value) for key, value in decoded["required_kid_by_agent"].items()
+        }
+    if "allowed_kids_by_agent" in decoded:
+        if not isinstance(decoded["allowed_kids_by_agent"], dict):
+            raise ValueError("allowed_kids_by_agent must be an object")
+        parsed: dict[str, set[str]] = {}
+        for key, value in decoded["allowed_kids_by_agent"].items():
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ValueError("allowed_kids_by_agent must map to string arrays")
+            parsed[str(key)] = set(value)
+        registry["allowed_kids_by_agent"] = parsed
+    if "revoked_kids" in decoded:
+        if not isinstance(decoded["revoked_kids"], list) or not all(isinstance(item, str) for item in decoded["revoked_kids"]):
+            raise ValueError("revoked_kids must be a string array")
+        registry["revoked_kids"] = set(decoded["revoked_kids"])
+    if "kid_not_after" in decoded:
+        if not isinstance(decoded["kid_not_after"], dict):
+            raise ValueError("kid_not_after must be an object")
+        registry["kid_not_after"] = {str(key): str(value) for key, value in decoded["kid_not_after"].items()}
+    if "decrypt_private_keys" in decoded:
+        if not isinstance(decoded["decrypt_private_keys"], dict):
+            raise ValueError("decrypt_private_keys must be an object")
+        registry["decrypt_private_keys"] = {
+            str(key): str(value) for key, value in decoded["decrypt_private_keys"].items()
+        }
+
+    return registry
 
 
 def _load_key_material(value: str) -> str:

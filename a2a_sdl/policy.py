@@ -21,6 +21,9 @@ class SecurityPolicy:
     allowed_agents: set[str] = field(default_factory=set)
     trusted_signing_keys: dict[str, str] = field(default_factory=dict)
     required_kid_by_agent: dict[str, str] = field(default_factory=dict)
+    allowed_kids_by_agent: dict[str, set[str]] = field(default_factory=dict)
+    revoked_kids: set[str] = field(default_factory=set)
+    kid_not_after: dict[str, str] = field(default_factory=dict)
     decrypt_private_keys: dict[str, str] = field(default_factory=dict)
 
 
@@ -52,9 +55,22 @@ def enforce_request_security(
     if not isinstance(kid, str) or not kid:
         raise EnvelopeValidationError("security policy requires sec.kid")
 
+    if kid in policy.revoked_kids:
+        raise EnvelopeValidationError("security policy rejects revoked sec.kid")
+
+    kid_expiry_raw = policy.kid_not_after.get(kid)
+    if kid_expiry_raw is not None:
+        kid_expiry = _parse_iso_utc(kid_expiry_raw)
+        if kid_expiry <= dt.datetime.now(dt.timezone.utc):
+            raise EnvelopeValidationError("security policy rejects expired sec.kid")
+
     expected_kid = policy.required_kid_by_agent.get(agent_id)
     if expected_kid is not None and kid != expected_kid:
         raise EnvelopeValidationError("security policy rejects sec.kid for agent")
+
+    allowed_kids = policy.allowed_kids_by_agent.get(agent_id)
+    if allowed_kids is not None and kid not in allowed_kids:
+        raise EnvelopeValidationError("security policy rejects sec.kid not in allowed rotation set")
 
     public_key = policy.trusted_signing_keys.get(kid)
     if public_key is None:
@@ -97,7 +113,7 @@ def _enforce_replay(envelope: dict[str, Any], replay_cache: ReplayCache | None) 
     if not isinstance(exp, str):
         raise EnvelopeValidationError("sec.replay.exp must be a string")
 
-    exp_ts = dt.datetime.fromisoformat(exp.replace("Z", "+00:00"))
+    exp_ts = _parse_iso_utc(exp)
     now = dt.datetime.now(dt.timezone.utc)
     if exp_ts <= now:
         raise EnvelopeValidationError("sec.replay expired")
@@ -142,3 +158,10 @@ def _decrypt_payload(envelope: dict[str, Any], policy: SecurityPolicy) -> None:
         decrypt_payload(envelope, policy.decrypt_private_keys[selected_kid], kid=selected_kid)
     except SecurityError as exc:
         raise EnvelopeValidationError(f"decryption failed: {exc}") from exc
+
+
+def _parse_iso_utc(value: str) -> dt.datetime:
+    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)

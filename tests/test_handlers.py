@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from a2a_sdl.handlers import default_handler, make_default_handler
+from a2a_sdl.handlers import ToolExecutionPolicy, default_handler, make_default_handler
 from a2a_sdl.envelope import validate_envelope
 from a2a_sdl.schema import get_builtin_descriptor
 
@@ -62,6 +62,7 @@ class HandlerTests(unittest.TestCase):
         self.assertIn("task.v1", res["payload"]["supported_ct"])
         self.assertIn("math.add", res["cap"]["tools"])
         self.assertIn("sys.ping", res["payload"]["available_tools"])
+        self.assertIn("versioning", res["payload"])
 
     def test_handler_derives_response_trace(self) -> None:
         req = make_task_envelope()
@@ -110,6 +111,22 @@ class HandlerTests(unittest.TestCase):
         req["payload"] = {"items": [], "refs": []}
         res = handler(req)
         self.assertEqual(res["ct"], "artifact.v1")
+
+    def test_tool_execution_policy_denies_unallowed_tool(self) -> None:
+        handler = make_default_handler(
+            tool_execution_policy=ToolExecutionPolicy(
+                allowed_tools={"sys.ping"},
+                max_args_bytes=1024,
+            )
+        )
+        req = make_task_envelope()
+        req["ct"] = "toolcall.v1"
+        req["schema"] = get_builtin_descriptor("toolcall.v1")
+        req["payload"] = {"tool": "math.add", "call_id": "sum-deny", "args": {"values": [1, 2]}, "expect": {}}
+        res = handler(req)
+        self.assertEqual(res["ct"], "toolresult.v1")
+        self.assertFalse(res["payload"]["ok"])
+        self.assertIn("denied by execution policy", " ".join(res["payload"]["logs"]))
 
 
 if __name__ == "__main__":
