@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import importlib
 import json
 import pathlib
 import sys
@@ -12,7 +13,7 @@ from typing import Any
 from .audit import AuditChain
 from .codec import decode_bytes, encode_bytes
 from .envelope import build_envelope, validate_envelope
-from .handlers import default_handler
+from .handlers import HandlerFn, make_default_handler
 from .policy import SecurityPolicy
 from .schema import get_builtin_descriptor
 from .security import (
@@ -67,6 +68,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     serve.add_argument("--audit-log-file", help="Append-only audit log path")
     serve.add_argument("--audit-signing-key", help="Ed25519 private key path for signing audit entries")
+    serve.add_argument(
+        "--handler-spec",
+        action="append",
+        default=[],
+        help="Custom request handler mapping: <ct>=<module>:<callable>",
+    )
     serve.set_defaults(func=_cmd_serve)
 
     send = subparsers.add_parser("send", help="Send a message over HTTP")
@@ -205,10 +212,21 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             print(f"failed to initialize audit chain: {exc}", file=sys.stderr)
             return 2
 
+    extra_handlers: dict[str, HandlerFn] = {}
+    for spec in args.handler_spec:
+        try:
+            ct, handler = _load_handler_spec(spec)
+        except Exception as exc:
+            print(f"invalid --handler-spec '{spec}': {exc}", file=sys.stderr)
+            return 2
+        extra_handlers[ct] = handler
+
+    handler = make_default_handler(extra_handlers=extra_handlers)
+
     server = A2AHTTPServer(
         args.host,
         args.port,
-        handler=default_handler,
+        handler=handler,
         replay_cache=replay_cache,
         enforce_replay=args.replay_protection,
         security_policy=security_policy,
@@ -350,6 +368,32 @@ def _load_payload(payload_file: str | None, payload_json: str | None) -> Any:
 
 def _write_text(path: pathlib.Path, value: str) -> None:
     path.write_text(value, encoding="utf-8")
+
+
+def _load_handler_spec(spec: str) -> tuple[str, HandlerFn]:
+    if "=" not in spec:
+        raise ValueError("expected format <ct>=<module>:<callable>")
+    content_type, target = spec.split("=", 1)
+    ct = content_type.strip()
+    if not ct:
+        raise ValueError("content type is empty")
+
+    if ":" not in target:
+        raise ValueError("expected handler target format <module>:<callable>")
+    module_name, attr_name = target.rsplit(":", 1)
+    module_name = module_name.strip()
+    attr_name = attr_name.strip()
+    if not module_name or not attr_name:
+        raise ValueError("module and callable must be non-empty")
+
+    module = importlib.import_module(module_name)
+    handler = getattr(module, attr_name, None)
+    if handler is None:
+        raise ValueError(f"callable '{attr_name}' not found in module '{module_name}'")
+    if not callable(handler):
+        raise TypeError(f"attribute '{attr_name}' in module '{module_name}' is not callable")
+
+    return ct, handler
 
 
 def _load_json_map(path: str) -> dict[str, str]:

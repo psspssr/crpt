@@ -6,7 +6,7 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from a2a_sdl.cli import main
+from a2a_sdl.cli import _load_handler_spec, main
 from a2a_sdl.envelope import build_envelope
 from a2a_sdl.schema import get_builtin_descriptor
 
@@ -200,6 +200,15 @@ class CLITests(unittest.TestCase):
                 code = main(["swarm", "--ports", "9001,9002"])
         self.assertEqual(code, 2)
         self.assertIn("exactly 3 ports", stderr.getvalue())
+
+    def test_load_handler_spec_valid(self) -> None:
+        ct, handler = _load_handler_spec("artifact.v1=json:loads")
+        self.assertEqual(ct, "artifact.v1")
+        self.assertTrue(callable(handler))
+
+    def test_load_handler_spec_invalid_format(self) -> None:
+        with self.assertRaises(ValueError):
+            _load_handler_spec("artifact.v1-json:loads")
 
 
 if __name__ == "__main__":

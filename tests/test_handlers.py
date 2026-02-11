@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from a2a_sdl.handlers import default_handler
+from a2a_sdl.handlers import default_handler, make_default_handler
 from a2a_sdl.envelope import validate_envelope
+from a2a_sdl.schema import get_builtin_descriptor
 
 from tests.test_helpers import make_task_envelope, make_trace
 
@@ -59,6 +60,8 @@ class HandlerTests(unittest.TestCase):
         res = default_handler(req)
         self.assertEqual(res["ct"], "negotiation.v1")
         self.assertIn("task.v1", res["payload"]["supported_ct"])
+        self.assertIn("math.add", res["cap"]["tools"])
+        self.assertIn("sys.ping", res["payload"]["available_tools"])
 
     def test_handler_derives_response_trace(self) -> None:
         req = make_task_envelope()
@@ -73,6 +76,40 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(trace["hops"], 2)
         self.assertNotEqual(trace["span_id"], "trace-span-1")
         validate_envelope(res)
+
+    def test_toolcall_executes_builtin_tool(self) -> None:
+        req = make_task_envelope()
+        req["ct"] = "toolcall.v1"
+        req["schema"] = get_builtin_descriptor("toolcall.v1")
+        req["payload"] = {"tool": "math.add", "call_id": "sum-1", "args": {"values": [1, 2.5, 3]}, "expect": {}}
+        res = default_handler(req)
+        self.assertEqual(res["ct"], "toolresult.v1")
+        self.assertTrue(res["payload"]["ok"])
+        self.assertEqual(res["payload"]["result"]["sum"], 6.5)
+        self.assertIn("math.add", res["cap"]["tools"])
+
+    def test_custom_handler_registration(self) -> None:
+        def _artifact_handler(request: dict[str, object]) -> dict[str, object]:
+            return {
+                "v": 1,
+                "type": "res",
+                "ts": request["ts"],
+                "id": "artifact-resp-1",
+                "from": request["to"],
+                "to": request["from"],
+                "ct": "artifact.v1",
+                "payload": {"items": [{"name": "x"}], "refs": []},
+                "schema": get_builtin_descriptor("artifact.v1"),
+                "sec": {"mode": "none"},
+            }
+
+        handler = make_default_handler(extra_handlers={"artifact.v1": _artifact_handler})
+        req = make_task_envelope()
+        req["ct"] = "artifact.v1"
+        req["schema"] = get_builtin_descriptor("artifact.v1")
+        req["payload"] = {"items": [], "refs": []}
+        res = handler(req)
+        self.assertEqual(res["ct"], "artifact.v1")
 
 
 if __name__ == "__main__":

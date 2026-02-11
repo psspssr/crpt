@@ -22,6 +22,8 @@ This repository implements:
 - Tamper-evident hash-chained audit log with optional Ed25519-signed audit receipts
 - WebSocket transport processing now matches HTTP validation/security behavior with structured `error.v1` responses
 - Built-in 3-buddy swarm command (`a2a swarm`) that coordinates Codex buddies through A2A envelopes
+- Executable `toolcall.v1` path with built-in tools (`sys.ping`, `math.add`)
+- Pluggable request handlers via `a2a serve --handler-spec <ct>=<module>:<callable>`
 
 ## How It Works
 
@@ -55,6 +57,7 @@ Core modules:
 - `a2a_sdl/transport_ws.py`: websocket payload processing with protocol-aligned errors.
 - `a2a_sdl/transport_ipc.py`: length-prefixed local IPC transport.
 - `a2a_sdl/swarm.py`: multi-buddy Codex orchestration over A2A envelopes.
+- `a2a_sdl/handlers.py`: content-type router, builtin handlers, and tool registry.
 - `a2a_sdl/cli.py`: operational entrypoints (`send`, `serve`, `swarm`, `keygen`, etc).
 
 Tests:
@@ -116,6 +119,30 @@ a2a send \
 - **IPC**: local framed transport (`uint32_be` + payload bytes), useful for same-host agent orchestration.
 
 All transports converge on shared envelope validation and handler semantics to keep behavior consistent.
+
+## Handler Extensibility (New)
+
+Two extensibility layers are built in:
+- **Tool registry for `toolcall.v1`**:
+  - `sys.ping`: liveness + echo payload
+  - `math.add`: numeric aggregation from `args.values`
+- **Content-type router**:
+  - default implementation for `task.v1`, `toolcall.v1`, `negotiation.v1`
+  - custom content types can be registered at server startup
+
+Protocol metadata improvement:
+- response envelopes now advertise available tools in `cap.tools`
+- negotiation responses include `payload.available_tools`
+
+Example custom handler wiring:
+
+```bash
+a2a serve \
+  --host 127.0.0.1 --port 8080 \
+  --handler-spec artifact.v1=myproject.handlers:artifact_handler
+```
+
+`artifact_handler(request)` must return a valid A2A response envelope.
 
 ## Security Model
 
