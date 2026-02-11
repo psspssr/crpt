@@ -7,10 +7,13 @@ from typing import Any
 
 from .utils import canonical_json_bytes
 
+_cbor2: Any
 try:
-    import cbor2
+    import cbor2 as _cbor2
 except Exception:  # pragma: no cover - optional dependency
-    cbor2 = None
+    _cbor2 = None
+
+cbor2: Any = _cbor2
 
 
 class CodecError(ValueError):

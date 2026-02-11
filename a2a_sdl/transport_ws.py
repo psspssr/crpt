@@ -11,10 +11,13 @@ from .policy import SecurityPolicy, enforce_request_security
 from .replay import ReplayCache
 from .transport_http import _enforce_replay, _fallback_request_envelope, _validation_error_response
 
+_websockets: Any
 try:
-    import websockets
+    import websockets as _websockets
 except Exception:  # pragma: no cover - optional dependency
-    websockets = None
+    _websockets = None
+
+websockets: Any = _websockets
 
 
 MessageHandler = Callable[[dict[str, Any]], dict[str, Any]]
