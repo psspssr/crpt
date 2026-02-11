@@ -1,0 +1,26 @@
+{
+  "kind": "task.v1",
+  "goal": "Summarize markdown into 5 bullets",
+  "inputs": {
+    "doc": "# Title\nSome content"
+  },
+  "constraints": {
+    "time_budget_s": 30,
+    "compute_budget": "low",
+    "safety": {
+      "no_secrets": true,
+      "no_external_calls": false
+    }
+  },
+  "deliverables": [
+    {
+      "type": "text",
+      "description": "5 bullets"
+    }
+  ],
+  "acceptance": [
+    "Exactly 5 bullets",
+    "No more than 15 words each"
+  ],
+  "context": {}
+}
