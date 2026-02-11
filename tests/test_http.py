@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 from a2a_sdl.codec import decode_bytes, encode_bytes
-from a2a_sdl.envelope import build_envelope, make_error_response
+from a2a_sdl.envelope import EnvelopeValidationError, build_envelope, make_error_response
 from a2a_sdl.audit import AuditChain, verify_audit_chain
 from a2a_sdl.policy import SecurityPolicy
 from a2a_sdl.replay import ReplayCache
@@ -245,6 +245,83 @@ class HTTPTests(unittest.TestCase):
             finally:
                 server.shutdown()
                 thread.join(timeout=1)
+
+    def test_inbound_uri_schema_is_rejected(self) -> None:
+        from a2a_sdl.handlers import default_handler
+
+        server = A2AHTTPServer("127.0.0.1", 0, handler=default_handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        time.sleep(0.05)
+
+        try:
+            port = server._server.server_address[1]
+            url = f"http://127.0.0.1:{port}/a2a"
+
+            req = make_task_envelope()
+            req["schema"] = {
+                "kind": "uri",
+                "id": "sha256:0123456789abcdef",
+                "uri": "http://127.0.0.1:9/schema.json",
+            }
+            body = encode_bytes(req, encoding="json")
+
+            http_req = urllib.request.Request(
+                url,
+                data=body,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(http_req, timeout=10) as response:
+                raw = response.read()
+            decoded = decode_bytes(raw, encoding="json")
+
+            self.assertEqual(decoded["ct"], "error.v1")
+            self.assertEqual(decoded["payload"]["code"], "SCHEMA_INVALID")
+            self.assertIn("uri descriptors are not allowed", decoded["payload"]["message"])
+        finally:
+            server.shutdown()
+            thread.join(timeout=1)
+
+    def test_content_length_over_max_bytes_is_rejected(self) -> None:
+        from a2a_sdl.handlers import default_handler
+
+        server = A2AHTTPServer("127.0.0.1", 0, handler=default_handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        time.sleep(0.05)
+
+        try:
+            port = server._server.server_address[1]
+            url = f"http://127.0.0.1:{port}/a2a"
+
+            oversized_body = b"x" * (1_048_576 + 1)
+            http_req = urllib.request.Request(
+                url,
+                data=oversized_body,
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(http_req, timeout=10) as response:
+                raw = response.read()
+            decoded = decode_bytes(raw, encoding="json")
+
+            self.assertEqual(decoded["ct"], "error.v1")
+            self.assertEqual(decoded["payload"]["code"], "BAD_REQUEST")
+            self.assertIn("exceeds max_bytes", decoded["payload"]["message"])
+        finally:
+            server.shutdown()
+            thread.join(timeout=1)
+
+    def test_send_http_rejects_uri_schema_descriptor_preflight(self) -> None:
+        req = make_task_envelope()
+        req["schema"] = {
+            "kind": "uri",
+            "id": "sha256:0123456789abcdef",
+            "uri": "http://127.0.0.1:9/schema.json",
+        }
+        with self.assertRaises(EnvelopeValidationError):
+            send_http("http://127.0.0.1:9/a2a", req, encoding="json")
 
 
 if __name__ == "__main__":

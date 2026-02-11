@@ -32,7 +32,7 @@ async def ws_send(
     if websockets is None:
         raise RuntimeError("websockets is not installed; install with a2a-sdl[ws]")
 
-    validate_envelope(envelope)
+    validate_envelope(envelope, allow_schema_uri=False)
     payload = encode_bytes(envelope, encoding=encoding)
 
     attempts = max(0, int(retry_attempts))
@@ -61,7 +61,7 @@ async def ws_send(
         response_bytes = response
 
     decoded = decode_bytes(response_bytes, encoding=encoding)
-    validate_envelope(decoded)
+    validate_envelope(decoded, allow_schema_uri=False)
     return decoded
 
 
@@ -124,7 +124,7 @@ def process_ws_payload(
         return encode_bytes(response_envelope, encoding=encoding)
 
     try:
-        validate_envelope(request_envelope)
+        validate_envelope(request_envelope, allow_schema_uri=False)
         if security_policy is not None:
             if enforce_replay and replay_cache is not None and not security_policy.require_replay:
                 _enforce_replay(request_envelope, replay_cache)

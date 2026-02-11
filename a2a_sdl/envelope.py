@@ -99,6 +99,7 @@ def validate_envelope(
     *,
     limits: dict[str, int] | None = None,
     validate_payload_schema: bool = True,
+    allow_schema_uri: bool = True,
 ) -> None:
     if not isinstance(envelope, dict):
         raise EnvelopeValidationError("envelope must be an object")
@@ -147,6 +148,9 @@ def validate_envelope(
     _validate_limits(envelope, active_limits)
 
     if validate_payload_schema and security_mode not in {"enc", "enc+sig"}:
+        descriptor = envelope["schema"]
+        if not allow_schema_uri and isinstance(descriptor, dict) and descriptor.get("kind") == "uri":
+            raise EnvelopeValidationError("schema invalid: uri descriptors are not allowed in this context")
         try:
             validate_payload(envelope["payload"], envelope["schema"])
         except SchemaValidationError as exc:

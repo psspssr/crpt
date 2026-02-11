@@ -29,6 +29,19 @@ class WSTransportTests(unittest.TestCase):
         self.assertEqual(decoded["ct"], "error.v1")
         self.assertEqual(decoded["payload"]["code"], "UNSUPPORTED_CT")
 
+    def test_process_ws_payload_rejects_uri_schema_descriptor(self) -> None:
+        req = make_task_envelope()
+        req["schema"] = {
+            "kind": "uri",
+            "id": "sha256:0123456789abcdef",
+            "uri": "http://127.0.0.1:9/schema.json",
+        }
+        out = process_ws_payload(encode_bytes(req, encoding="json"), encoding="json", handler=default_handler)
+        decoded = decode_bytes(out, encoding="json")
+        self.assertEqual(decoded["ct"], "error.v1")
+        self.assertEqual(decoded["payload"]["code"], "SCHEMA_INVALID")
+        self.assertIn("uri descriptors are not allowed", decoded["payload"]["message"])
+
     def test_process_ws_payload_enforce_replay_rejects_duplicate_nonce(self) -> None:
         cache = ReplayCache()
 

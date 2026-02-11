@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import socket
 import threading
 import time
 import unittest
 
+from a2a_sdl.codec import decode_bytes, encode_bytes
+from a2a_sdl.envelope import EnvelopeValidationError
 from a2a_sdl.handlers import default_handler
 from a2a_sdl.policy import SecurityPolicy
 from a2a_sdl.replay import ReplayCache
@@ -36,6 +39,49 @@ class IPCTransportTests(unittest.TestCase):
             res = send_ipc("127.0.0.1", port, req, encoding="json")
             self.assertEqual(res["type"], "res")
             self.assertEqual(res["ct"], "state.v1")
+        finally:
+            server.shutdown()
+            thread.join(timeout=1)
+
+    def test_send_ipc_rejects_uri_schema_descriptor(self) -> None:
+        req = make_task_envelope()
+        req["schema"] = {
+            "kind": "uri",
+            "id": "sha256:0123456789abcdef",
+            "uri": "http://127.0.0.1:9/schema.json",
+        }
+        with self.assertRaises(EnvelopeValidationError):
+            send_ipc("127.0.0.1", 9, req, encoding="json")
+
+    def test_ipc_server_rejects_uri_schema_descriptor(self) -> None:
+        server = IPCServer("127.0.0.1", 0, handler=default_handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        time.sleep(0.05)
+
+        try:
+            port = server._server.server_address[1]
+            req = make_task_envelope()
+            req["schema"] = {
+                "kind": "uri",
+                "id": "sha256:0123456789abcdef",
+                "uri": "http://127.0.0.1:9/schema.json",
+            }
+            raw_req = encode_bytes(req, encoding="json")
+            with socket.create_connection(("127.0.0.1", port), timeout=10.0) as conn:
+                conn.sendall(encode_ipc_frame(raw_req))
+                header = conn.recv(4)
+                self.assertEqual(len(header), 4)
+                size = int.from_bytes(header, "big")
+                payload = b""
+                while len(payload) < size:
+                    payload += conn.recv(size - len(payload))
+            frames, rem = decode_ipc_frames(header + payload)
+            self.assertFalse(rem)
+            res = decode_bytes(frames[0], encoding="json")
+            self.assertEqual(res["ct"], "error.v1")
+            self.assertEqual(res["payload"]["code"], "SCHEMA_INVALID")
+            self.assertIn("uri descriptors are not allowed", res["payload"]["message"])
         finally:
             server.shutdown()
             thread.join(timeout=1)

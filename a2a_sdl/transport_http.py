@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -12,6 +13,7 @@ from typing import Any, Callable
 from .audit import AuditChain
 from .codec import CodecError, decode_bytes, detect_encoding_from_content_type, encode_bytes
 from .constants import (
+    DEFAULT_LIMITS,
     SUPPORTED_CONTENT_TYPES,
     SUPPORTED_ENC_ALGS,
     SUPPORTED_SECURITY_MODES,
@@ -66,21 +68,78 @@ class A2AHTTPServer:
         audit_chain = self.audit_chain
 
         class RequestHandler(BaseHTTPRequestHandler):
+            _READ_TIMEOUT_S = 15.0
+
             def do_POST(self) -> None:  # noqa: N802
                 if self.path != "/a2a":
                     self.send_error(404, "Not Found")
                     return
 
+                content_type = self.headers.get("Content-Type")
+                encoding = detect_encoding_from_content_type(content_type)
+                accept = self.headers.get("Accept", "")
+
+                def _send_protocol_response(response_envelope: dict[str, Any]) -> None:
+                    response_encoding = "cbor" if "application/cbor" in accept else encoding
+                    try:
+                        response_bytes = encode_bytes(response_envelope, encoding=response_encoding)
+                        response_ct = "application/cbor" if response_encoding == "cbor" else "application/json"
+                    except Exception:
+                        response_bytes = encode_bytes(response_envelope, encoding="json")
+                        response_ct = "application/json"
+
+                    try:
+                        self.send_response(200)
+                        self.send_header("Content-Type", response_ct)
+                        self.send_header("Content-Length", str(len(response_bytes)))
+                        self.end_headers()
+                        self.wfile.write(response_bytes)
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
+
                 length_header = self.headers.get("Content-Length", "0")
                 try:
                     length = int(length_header)
                 except ValueError:
-                    self.send_error(400, "Invalid Content-Length")
+                    response_envelope = make_error_response(
+                        request=_fallback_request_envelope(),
+                        code="BAD_REQUEST",
+                        message="invalid Content-Length",
+                    )
+                    _send_protocol_response(response_envelope)
                     return
 
-                body = self.rfile.read(length)
-                content_type = self.headers.get("Content-Type")
-                encoding = detect_encoding_from_content_type(content_type)
+                if length < 0:
+                    response_envelope = make_error_response(
+                        request=_fallback_request_envelope(),
+                        code="BAD_REQUEST",
+                        message="negative Content-Length",
+                    )
+                    _send_protocol_response(response_envelope)
+                    return
+
+                max_bytes = int(DEFAULT_LIMITS["max_bytes"])
+                if length > max_bytes:
+                    response_envelope = make_error_response(
+                        request=_fallback_request_envelope(),
+                        code="BAD_REQUEST",
+                        message=f"content-length exceeds max_bytes ({max_bytes})",
+                        details={"max_bytes": max_bytes},
+                    )
+                    _send_protocol_response(response_envelope)
+                    return
+
+                try:
+                    self.connection.settimeout(self._READ_TIMEOUT_S)
+                    body = self.rfile.read(length)
+                except (TimeoutError, socket.timeout):
+                    response_envelope = make_error_response(
+                        request=_fallback_request_envelope(),
+                        code="BAD_REQUEST",
+                        message="request read timeout",
+                    )
+                    _send_protocol_response(response_envelope)
+                    return
 
                 request_envelope: dict[str, Any] | None = None
                 try:
@@ -109,29 +168,11 @@ class A2AHTTPServer:
                             message=f"audit response invalid: {exc}",
                         )
 
-                accept = self.headers.get("Accept", "")
-                response_encoding = "cbor" if "application/cbor" in accept else encoding
-
-                try:
-                    response_bytes = encode_bytes(response_envelope, encoding=response_encoding)
-                    response_ct = "application/cbor" if response_encoding == "cbor" else "application/json"
-                except Exception:
-                    response_bytes = encode_bytes(response_envelope, encoding="json")
-                    response_ct = "application/json"
-
-                try:
-                    self.send_response(200)
-                    self.send_header("Content-Type", response_ct)
-                    self.send_header("Content-Length", str(len(response_bytes)))
-                    self.end_headers()
-                    self.wfile.write(response_bytes)
-                except (BrokenPipeError, ConnectionResetError):
-                    # Client disconnected before response flush.
-                    return
+                _send_protocol_response(response_envelope)
 
             def _process_request(self, request_envelope: dict[str, Any]) -> dict[str, Any]:
                 try:
-                    validate_envelope(request_envelope)
+                    validate_envelope(request_envelope, allow_schema_uri=False)
                     if security_policy is not None:
                         if enforce_replay and replay_cache is not None and not security_policy.require_replay:
                             _enforce_replay(request_envelope, replay_cache)
@@ -190,7 +231,7 @@ def send_http(
     retry_attempts: int = 0,
     retry_backoff_s: float = 0.0,
 ) -> dict[str, Any]:
-    validate_envelope(envelope)
+    validate_envelope(envelope, allow_schema_uri=False)
     payload = encode_bytes(envelope, encoding=encoding)
 
     content_type = "application/cbor" if encoding == "cbor" else "application/json"
@@ -230,7 +271,7 @@ def send_http(
 
     response_encoding = detect_encoding_from_content_type(response_content_type)
     decoded = decode_bytes(body, encoding=response_encoding)
-    validate_envelope(decoded)
+    validate_envelope(decoded, allow_schema_uri=False)
     return decoded
 
 
@@ -311,7 +352,7 @@ def create_fastapi_app(handler: MessageHandler):
         try:
             decoded = decode_bytes(body, encoding=encoding)
             try:
-                validate_envelope(decoded)
+                validate_envelope(decoded, allow_schema_uri=False)
             except EnvelopeValidationError as exc:
                 result = _validation_error_response(decoded, exc)
             else:

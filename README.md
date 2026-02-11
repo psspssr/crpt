@@ -24,6 +24,8 @@ This repository implements:
 - Built-in 3-buddy swarm command (`a2a swarm`) that coordinates Codex buddies through A2A envelopes
 - Executable `toolcall.v1` path with built-in tools (`sys.ping`, `math.add`)
 - Pluggable request handlers via `a2a serve --handler-spec <ct>=<module>:<callable>`
+- Ingress hardening: oversized `Content-Length` rejected before body read
+- URI-schema hardening: untrusted URI descriptors rejected on HTTP/WS/IPC ingress and transport client preflight
 
 ## How It Works
 

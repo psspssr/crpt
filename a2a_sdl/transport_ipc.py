@@ -63,7 +63,7 @@ def send_ipc(
     encoding: str = "json",
     timeout: float = 10.0,
 ) -> dict[str, Any]:
-    validate_envelope(envelope)
+    validate_envelope(envelope, allow_schema_uri=False)
     payload = encode_bytes(envelope, encoding=encoding)
 
     with socket.create_connection((host, port), timeout=timeout) as conn:
@@ -71,7 +71,7 @@ def send_ipc(
         response_payload = _read_frame(conn, timeout=timeout)
 
     decoded = decode_bytes(response_payload, encoding=encoding)
-    validate_envelope(decoded)
+    validate_envelope(decoded, allow_schema_uri=False)
     return decoded
 
 
