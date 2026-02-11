@@ -12,7 +12,7 @@ from .replay import ReplayCache
 from .transport_http import _enforce_replay, _fallback_request_envelope, _validation_error_response
 
 try:
-    import websockets  # type: ignore
+    import websockets
 except Exception:  # pragma: no cover - optional dependency
     websockets = None
 

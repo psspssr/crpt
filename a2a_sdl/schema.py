@@ -9,7 +9,7 @@ from typing import Any, Callable
 from .utils import canonical_json_bytes, sha256_prefixed
 
 try:
-    import jsonschema as _jsonschema  # type: ignore
+    import jsonschema as _jsonschema
 except Exception:  # pragma: no cover - optional dependency
     _jsonschema = None
 

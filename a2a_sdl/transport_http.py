@@ -343,7 +343,7 @@ def create_fastapi_app(handler: MessageHandler):
     """Create FastAPI app if fastapi is installed."""
 
     try:
-        from fastapi import FastAPI, Request, Response  # type: ignore
+        from fastapi import FastAPI, Request, Response
     except Exception as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("fastapi is not installed; install with a2a-sdl[http]") from exc
 

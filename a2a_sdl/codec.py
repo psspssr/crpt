@@ -8,7 +8,7 @@ from typing import Any
 from .utils import canonical_json_bytes
 
 try:
-    import cbor2  # type: ignore
+    import cbor2
 except Exception:  # pragma: no cover - optional dependency
     cbor2 = None
 
