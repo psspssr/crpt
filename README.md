@@ -67,22 +67,36 @@ Tests:
 
 ## Installation
 
-Recommended (isolated CLI install):
+Recommended (isolated CLI install with `uv`):
 
 ```bash
-pipx install "a2a-sdl[full]"
+uv tool install "a2a-sdl[full]"
+uv tool update-shell
 ```
 
-Library/virtualenv install:
+From local checkout (editable dev install as a tool):
+
+```bash
+uv tool install --editable "/path/to/crpt[full]"
+```
+
+From GitHub (without publishing to PyPI):
+
+```bash
+uv tool install "git+https://github.com/psspssr/crpt.git"
+```
+
+One-off command execution without permanent install:
+
+```bash
+uv tool run --from "a2a-sdl[full]" a2a --help
+```
+
+Alternative installers:
 
 ```bash
 pip install "a2a-sdl[full]"
-```
-
-Minimal install (core only):
-
-```bash
-pip install a2a-sdl
+pipx install "a2a-sdl[full]"
 ```
 
 Useful extras:
@@ -94,10 +108,7 @@ Useful extras:
 ## Quick Start
 
 ```bash
-cd /root/crpt
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+uv tool install --force "/root/crpt[full]"
 a2a keygen --out-dir .keys
 ```
 
