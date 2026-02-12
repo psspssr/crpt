@@ -351,7 +351,11 @@ def _parse_buddy_output(raw: str) -> dict[str, str]:
                 decoded = json.loads(extracted)
                 return _normalize_buddy_reply(decoded)
             except Exception:
-                extracted = None
+                return {
+                    "status": _infer_status_from_text(text),
+                    "summary": _infer_summary_from_text(text),
+                    "handoff": _infer_handoff_from_text(text),
+                }
         return {
             "status": _infer_status_from_text(text),
             "summary": _infer_summary_from_text(text),

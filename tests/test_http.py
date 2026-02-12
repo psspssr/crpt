@@ -342,6 +342,11 @@ class HTTPTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             send_http("file:///tmp/a2a", req, encoding="json")
 
+    def test_send_http_rejects_url_with_fragment(self) -> None:
+        req = make_task_envelope()
+        with self.assertRaises(ValueError):
+            send_http("http://127.0.0.1:8080/a2a#frag", req, encoding="json")
+
     def test_admission_controller_rate_limits_requests(self) -> None:
         from a2a_sdl.handlers import default_handler
 

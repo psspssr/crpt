@@ -219,7 +219,11 @@ class A2AHTTPServer:
         self._ready = True
         self._validate_tls_config()
         self._server = self._build_server()
-        self._wrap_server_socket_with_tls()
+        try:
+            self._wrap_server_socket_with_tls()
+        except Exception:
+            self._server.server_close()
+            raise
 
     def _validate_tls_config(self) -> None:
         has_cert = bool(self.tls_certfile)
@@ -627,6 +631,10 @@ def _validate_http_url(url: str) -> None:
         raise ValueError("url scheme must be http or https")
     if not parsed.netloc:
         raise ValueError("url must include host and optional port")
+    if parsed.fragment:
+        raise ValueError("url must not include a fragment")
+    if parsed.path and not parsed.path.startswith("/"):
+        raise ValueError("url path must be absolute")
 
 
 def create_fastapi_app(handler: MessageHandler):

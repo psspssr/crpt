@@ -6,7 +6,7 @@ import json
 import os
 from typing import Any
 
-from cryptography.exceptions import InvalidSignature
+from cryptography.exceptions import InvalidSignature, InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
@@ -288,7 +288,7 @@ def _try_unwrap_entry(entry: dict[str, Any], recipient_key: X25519PrivateKey) ->
         shared = recipient_key.exchange(eph_public)
         wrap_key = _derive_key(shared, b"a2a-sdl-key-wrap-v1")
         return ChaCha20Poly1305(wrap_key).decrypt(wrap_nonce, wrapped_key, None)
-    except Exception:
+    except (SecurityError, ValueError, TypeError, InvalidTag):
         return None
 
 
