@@ -9,10 +9,11 @@ import subprocess  # nosec B404
 import tempfile
 import textwrap
 import threading
+from urllib.error import URLError
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .envelope import build_envelope
+from .envelope import EnvelopeValidationError, build_envelope
 from .schema import get_builtin_descriptor
 from .transport_http import A2AHTTPServer, send_http
 from .utils import new_message_id
@@ -65,7 +66,7 @@ class CodexBackend:
                     timeout=self.timeout_s,
                     check=False,
                 )  # nosec B603
-            except Exception as exc:
+            except (OSError, subprocess.SubprocessError) as exc:
                 return json.dumps(
                     {
                         "status": "working",
@@ -77,7 +78,7 @@ class CodexBackend:
             try:
                 with open(out_path, "r", encoding="utf-8") as f:
                     result = f.read().strip()
-            except Exception:
+            except (OSError, UnicodeDecodeError):
                 result = ""
 
             if proc.returncode != 0 and not result:
@@ -261,7 +262,15 @@ class SwarmCoordinator:
                     result = response.get("payload", {}).get("result", {})
                     reply = result.get("reply") if isinstance(result, dict) else None
                     normalized = _normalize_buddy_reply(reply)
-                except Exception as exc:
+                except (
+                    TimeoutError,
+                    URLError,
+                    OSError,
+                    EnvelopeValidationError,
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                ) as exc:
                     normalized = {
                         "status": "working",
                         "summary": f"transport error: {type(exc).__name__}",
@@ -344,23 +353,15 @@ def _parse_buddy_output(raw: str) -> dict[str, str]:
 
     try:
         decoded = json.loads(text)
-    except Exception:
+    except json.JSONDecodeError:
         extracted = _extract_json_object(text)
         if extracted is not None:
             try:
                 decoded = json.loads(extracted)
                 return _normalize_buddy_reply(decoded)
-            except Exception:
-                return {
-                    "status": _infer_status_from_text(text),
-                    "summary": _infer_summary_from_text(text),
-                    "handoff": _infer_handoff_from_text(text),
-                }
-        return {
-            "status": _infer_status_from_text(text),
-            "summary": _infer_summary_from_text(text),
-            "handoff": _infer_handoff_from_text(text),
-        }
+            except json.JSONDecodeError:
+                return _infer_buddy_reply(text)
+        return _infer_buddy_reply(text)
 
     return _normalize_buddy_reply(decoded)
 
@@ -438,3 +439,11 @@ def _infer_handoff_from_text(text: str) -> str:
             if value:
                 return value[:200]
     return "Continue and return strict JSON format."
+
+
+def _infer_buddy_reply(text: str) -> dict[str, str]:
+    return {
+        "status": _infer_status_from_text(text),
+        "summary": _infer_summary_from_text(text),
+        "handoff": _infer_handoff_from_text(text),
+    }

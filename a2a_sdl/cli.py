@@ -489,7 +489,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
             sign_key_value = _load_key_material(args.sign_key)
             sign_envelope(envelope, sign_key_value, kid=args.sign_kid)
 
-    validate_envelope(envelope, validate_payload_schema=False if args.encrypt_pub else True)
+    validate_envelope(envelope, validate_payload_schema=not args.encrypt_pub)
 
     send_fn = send_http_with_auto_downgrade if args.auto_negotiate else send_http
     response = send_fn(

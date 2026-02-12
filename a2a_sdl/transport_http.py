@@ -263,7 +263,7 @@ class A2AHTTPServer:
         class RequestHandler(BaseHTTPRequestHandler):
             _READ_TIMEOUT_S = 15.0
 
-            def do_GET(self) -> None:  # noqa: N802
+            def do_GET(self) -> None:
                 if not admin_enabled:
                     self.send_error(404, "Not Found")
                     return
@@ -296,11 +296,7 @@ class A2AHTTPServer:
 
                 if self.path == "/metrics":
                     body = metrics.render_prometheus().encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/plain; version=0.0.4")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
+                    self._send_bytes(body, content_type="text/plain; version=0.0.4", status_code=200)
                     return
 
                 self.send_error(404, "Not Found")
@@ -316,13 +312,19 @@ class A2AHTTPServer:
 
             def _send_json(self, payload: dict[str, Any], *, status_code: int = 200) -> None:
                 body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-                self.send_response(status_code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_bytes(body, content_type="application/json", status_code=status_code)
 
-            def do_POST(self) -> None:  # noqa: N802
+            def _send_bytes(self, body: bytes, *, content_type: str, status_code: int = 200) -> None:
+                try:
+                    self.send_response(status_code)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+
+            def do_POST(self) -> None:
                 if self.path != "/a2a":
                     self.send_error(404, "Not Found")
                     return
@@ -631,6 +633,8 @@ def _validate_http_url(url: str) -> None:
         raise ValueError("url scheme must be http or https")
     if not parsed.netloc:
         raise ValueError("url must include host and optional port")
+    if parsed.username or parsed.password:
+        raise ValueError("url must not include embedded credentials")
     if parsed.fragment:
         raise ValueError("url must not include a fragment")
     if parsed.path and not parsed.path.startswith("/"):

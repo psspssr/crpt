@@ -59,6 +59,33 @@ class SwarmTests(unittest.TestCase):
             self.assertEqual(result, "ok")
             self.assertFalse(os.path.exists(out_path))
 
+    def test_codex_backend_handles_non_utf8_output_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "buddy-output.bin")
+
+            class _TmpFile:
+                def __enter__(self):
+                    with open(out_path, "wb"):
+                        pass
+                    self.name = out_path
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            def fake_run(*args, **kwargs):
+                with open(out_path, "wb") as f:
+                    f.write(b"\xff\xfe")
+                return SimpleNamespace(returncode=0, stdout="fallback", stderr="")
+
+            backend = CodexBackend(workdir=".", timeout_s=1)
+            with mock.patch("a2a_sdl.swarm.tempfile.NamedTemporaryFile", return_value=_TmpFile()):
+                with mock.patch("a2a_sdl.swarm.subprocess.run", side_effect=fake_run):
+                    result = backend.run("hello")
+
+            self.assertEqual(result, "fallback")
+            self.assertFalse(os.path.exists(out_path))
+
     def test_normalize_buddy_reply_defaults(self) -> None:
         reply = _normalize_buddy_reply({"status": "bad", "summary": "", "handoff": ""})
         self.assertEqual(reply["status"], "working")
