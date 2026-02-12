@@ -2,6 +2,8 @@
 
 A2A-SDL is a machine-optimized, self-describing protocol for cross-agent communication with strict validation, canonical encoding, and optional cryptographic security.
 
+Published package: https://pypi.org/project/a2acrpt/ (latest released: `0.1.0`)
+
 This repository implements:
 - Envelope validation and limits (`max_bytes`, `max_depth`, `max_array_len`)
 - JSON canonical encoding and optional canonical CBOR
@@ -86,7 +88,7 @@ Tests:
 Recommended (isolated CLI install with `uv`):
 
 ```bash
-uv tool install "a2acrpt[full]"
+uv tool install --upgrade "a2acrpt[full]"
 uv tool update-shell
 ```
 
@@ -125,7 +127,7 @@ Useful extras:
 ## Quick Start
 
 ```bash
-uv tool install --force "/root/crpt[full]"
+uv tool install --upgrade "a2acrpt[full]"
 a2a keygen --out-dir .keys
 ```
 
@@ -371,10 +373,11 @@ python3 -m unittest discover -s tests -v
 
 ## Release (Maintainers)
 
-One-time setup:
-1. Create a PyPI project named `a2acrpt`.
-2. In PyPI, add a Trusted Publisher for this GitHub repo/workflow.
-3. In GitHub repo settings, create environment `pypi` (optional protection rules).
+Current Trusted Publisher configuration:
+1. PyPI project: `a2acrpt`
+2. GitHub repository: `psspssr/crpt`
+3. Workflow: `.github/workflows/publish-pypi.yml`
+4. Environment name: `pypi`
 
 Automated release:
 1. Bump version in `pyproject.toml`.
