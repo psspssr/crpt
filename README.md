@@ -1,89 +1,34 @@
-# A2A-SDL (Reference Implementation)
+# A2A-SDL
 
-A2A-SDL is a machine-optimized, self-describing protocol for cross-agent communication with strict validation, canonical encoding, and optional cryptographic security.
+[![PyPI version](https://img.shields.io/pypi/v/a2acrpt.svg)](https://pypi.org/project/a2acrpt/)
+[![Python versions](https://img.shields.io/pypi/pyversions/a2acrpt.svg)](https://pypi.org/project/a2acrpt/)
+[![CI](https://github.com/psspssr/crpt/actions/workflows/ci.yml/badge.svg)](https://github.com/psspssr/crpt/actions/workflows/ci.yml)
 
-Published package: https://pypi.org/project/a2acrpt/ (latest released: `0.1.0`)
+A2A-SDL is a production-oriented reference implementation of a self-describing agent-to-agent protocol with strict envelope validation, deterministic encoding, and optional cryptographic security.
 
-This repository implements:
-- Envelope validation and limits (`max_bytes`, `max_depth`, `max_array_len`)
-- JSON canonical encoding and optional canonical CBOR
-- Embedded/URI schema descriptors with content-hash checks
-- Optional JSON Schema validation (when `jsonschema` is installed)
-- Ed25519 signing/verification
-- X25519 + ChaCha20-Poly1305 payload encryption
-- Replay nonce cache
-- HTTP transport (stdlib server/client + optional FastAPI app)
-- Local IPC transport binding (length-prefixed `uint32_be` frames)
-- CLI for send/serve/keys/validation
-- Structured error mapping for protocol validation failures (`UNSUPPORTED_CT`, `SCHEMA_INVALID`, `SECURITY_UNSUPPORTED`)
-- HTTP client retries/backoff and configurable timeout (`a2a send --timeout --retry-attempts --retry-backoff-s`)
-- Optional server-side replay enforcement (`a2a serve --replay-protection`)
-- Trace enforcement with hop limits (`trace.root_id`, `trace.span_id`, `trace.hops`) and derived child trace on responses
-- Optional automatic content-type negotiation fallback (`a2a send --auto-negotiate`)
-- Secure policy mode for mandatory `enc+sig+replay`, key-based authz, and allowlisted agents
-- Tamper-evident hash-chained audit log with optional Ed25519-signed audit receipts
-- WebSocket transport processing now matches HTTP validation/security behavior with structured `error.v1` responses
-- Built-in multi-buddy swarm command (`a2a swarm`, 2+ buddies) that coordinates Codex buddies through A2A envelopes
-- Executable `toolcall.v1` path with built-in tools (`sys.ping`, `math.add`)
-- Pluggable request handlers via `a2a serve --handler-spec <ct>=<module>:<callable>`
-- Ingress hardening: oversized `Content-Length` rejected before body read
-- URI-schema hardening: untrusted URI descriptors rejected on HTTP/WS/IPC ingress and transport client preflight
-- Key lifecycle policy support: key rotation sets, revoked key IDs, and per-kid expiry checks
-- Plugin safety controls: deny-by-default tool execution and strict custom handler module/manifest validation
-- Stress and fuzz testing for malformed envelopes and concurrent HTTP load
-- Durable replay protection via optional SQLite-backed nonce cache (`--replay-db-file`)
-- Distributed replay protection via optional Redis backend (`--replay-redis-url`)
-- Production transport controls: TLS/mTLS options and production deployment profile
-- Outbound HTTPS client mTLS controls for `a2a send` (`--tls-ca-file`, client cert/key options)
-- Admission control with concurrency + token-bucket rate limiting
-- Optional admin observability endpoints (`/healthz`, `/readyz`, `/metrics`) with Prometheus-compatible metrics output
-- Audit signature verification support for signed audit chains
-- Optional external audit hash anchoring (`--audit-anchor-url`) with fail-open/fail-closed modes
-- Runtime capability-version enforcement (`cap.a2a_sdl.v`) for peer compatibility checks
-- Runtime migration/deprecation policy enforcement via `--version-policy-file`
-- Dynamic trust lifecycle protocol (`trustsync.v1`) with signed registry update proposals
-- Negotiated session binding handshake (`session.v1`) with optional detached Ed25519 binding signature
-- Fine-grained tool authorization (per-agent grants and required scopes via `--tool-policy-file`)
+Published package: https://pypi.org/project/a2acrpt/ (current release: `0.1.0`)
 
-## How It Works
+## Project Status
 
-At runtime, every message is an envelope with:
-- **Identity** (`from`, `to`) for routing and access-policy checks
-- **Payload type** (`ct`) for handler dispatch and schema validation
-- **Payload** (`payload`) with request/response body
-- **Schema descriptor** (`schema`) for self-describing validation
-- **Security** (`sec`) for signatures, encryption metadata, and replay tokens
-- **Trace** (`trace`) for request lineage and hop control
+- Protocol version: `v1`
+- Package name: `a2acrpt`
+- Python: `>=3.11`
+- Scope: secure messaging envelopes and transport bindings (HTTP/WS/IPC), not a full agent platform
 
-Typical request flow:
-1. Build envelope with `build_envelope(...)`.
-2. Canonically encode (`json`, optional `cbor`) with deterministic ordering.
-3. Optionally encrypt payload and attach replay nonce/expiry.
-4. Optionally sign envelope.
-5. Send over transport (`HTTP`, `WS`, or local `IPC`).
-6. Receiver validates envelope, capability version compatibility, security policy, replay cache, and schema.
-7. Handler returns a typed response envelope (`toolresult.v1`, `task.v1`, or `error.v1`).
+## Core Capabilities
 
-## Project Structure
+- Envelope validation with strict limits (`max_bytes`, `max_depth`, `max_array_len`, trace hop enforcement)
+- Canonical JSON encoding and optional canonical CBOR
+- Schema descriptors (embedded or URI) with hash verification
+- Security primitives: Ed25519 signatures, X25519 + ChaCha20-Poly1305 encryption
+- Replay protection backends: in-memory, SQLite, Redis
+- Secure policy enforcement (`enc+sig+replay`, key trust maps, key rotation/revocation/expiry)
+- Runtime compatibility and migration policy enforcement (`cap.a2a_sdl.v`, deprecation/version ranges)
+- HTTP/WS/IPC transport parity with structured protocol errors
+- Optional admin observability endpoints (`/healthz`, `/readyz`, `/metrics`)
+- Tamper-evident audit log with optional external hash anchoring
 
-Core modules:
-- `a2a_sdl/envelope.py`: envelope construction, validation limits, trace checks.
-- `a2a_sdl/schema.py`: builtin descriptors, hash checks, JSON schema integration.
-- `a2a_sdl/codec.py`: canonical JSON/CBOR encode/decode.
-- `a2a_sdl/security.py`: Ed25519 signatures and X25519+ChaCha20-Poly1305 encryption.
-- `a2a_sdl/policy.py`: secure-required policy enforcement (`enc+sig+replay`, key allowlists).
-- `a2a_sdl/replay.py`: nonce cache for replay protection.
-- `a2a_sdl/transport_http.py`: stdlib server/client, retries, fallback negotiation.
-- `a2a_sdl/transport_ws.py`: websocket payload processing with protocol-aligned errors.
-- `a2a_sdl/transport_ipc.py`: length-prefixed local IPC transport.
-- `a2a_sdl/swarm.py`: multi-buddy Codex orchestration over A2A envelopes.
-- `a2a_sdl/handlers.py`: content-type router, builtin handlers, and tool registry.
-- `a2a_sdl/cli.py`: operational entrypoints (`send`, `serve`, `swarm`, `keygen`, etc).
-
-Tests:
-- `tests/` contains unit coverage for envelope rules, security, transports, policy, and swarm convergence behavior.
-
-## Installation
+## Install
 
 Recommended (isolated CLI install with `uv`):
 
@@ -92,127 +37,91 @@ uv tool install --upgrade "a2acrpt[full]"
 uv tool update-shell
 ```
 
-From local checkout (editable dev install as a tool):
+Alternatives:
 
 ```bash
-uv tool install --editable "/path/to/crpt[full]"
-```
-
-From GitHub (without publishing to PyPI):
-
-```bash
-uv tool install "git+https://github.com/psspssr/crpt.git"
-```
-
-One-off command execution without permanent install:
-
-```bash
-uv tool run --from "a2acrpt[full]" a2a --help
-```
-
-Alternative installers:
-
-```bash
-pip install "a2acrpt[full]"
 pipx install "a2acrpt[full]"
+pip install "a2acrpt[full]"
 ```
 
-Useful extras:
-- `a2acrpt[cbor]` for CBOR codec support
-- `a2acrpt[schema]` for JSON Schema validation
-- `a2acrpt[http]` for FastAPI/uvicorn adapter
-- `a2acrpt[ws]` for websocket transport
-- `a2acrpt[redis]` for distributed replay cache backend
+Optional extras:
+
+- `a2acrpt[cbor]`
+- `a2acrpt[schema]`
+- `a2acrpt[http]`
+- `a2acrpt[ws]`
+- `a2acrpt[redis]`
 
 ## Quick Start
 
-```bash
-uv tool install --upgrade "a2acrpt[full]"
-a2a keygen --out-dir .keys
-```
+This flow does not require a repository checkout.
 
-Send a task over HTTP:
+1. Start a local server:
 
 ```bash
 a2a serve --host 127.0.0.1 --port 8080 --deployment-mode dev --allow-insecure-http
-# in another shell:
-a2a send --url http://127.0.0.1:8080/a2a --ct task.v1 --payload-file a2a_sdl/examples/task_min_payload.json --timeout 30 --retry-attempts 2 --retry-backoff-s 0.25 --auto-negotiate
 ```
 
-Secure server mode (mandatory encrypted/signed inbound requests + audit log):
+2. Create a minimal valid `task.v1` payload:
 
 ```bash
-# trusted_signing_keys.json: { "<sender-kid>": "<ed25519-public-key>" }
-# decrypt_keys.json: { "<server-recipient-kid>": "<x25519-private-key>" }
-# agent_kid_map.json: { "<sender-agent-id>": "<sender-kid>" }
+cat > task.json <<'JSON'
+{
+  "kind": "task.v1",
+  "goal": "Return a short confirmation message",
+  "inputs": {},
+  "constraints": {
+    "time_budget_s": 30,
+    "compute_budget": "low",
+    "safety": {}
+  },
+  "deliverables": [
+    {"type": "text", "description": "One-line confirmation"}
+  ],
+  "acceptance": ["Respond with a valid A2A envelope"],
+  "context": {}
+}
+JSON
+```
 
+3. Send the request:
+
+```bash
+a2a send \
+  --url http://127.0.0.1:8080/a2a \
+  --ct task.v1 \
+  --payload-file task.json
+```
+
+Expected result: a response envelope (typically `state.v1` or `error.v1`) printed as JSON.
+
+## Production Baseline
+
+Minimum safe baseline before internet exposure:
+
+- Use `--deployment-mode prod`
+- Enforce TLS (and mTLS if required)
+- Enforce `--secure-required`
+- Use durable replay storage (`--replay-db-file` or `--replay-redis-url`)
+- Load trusted signing/decryption keys and agent authorization maps
+- Protect admin endpoints with `--admin-token`
+
+Example hardened server profile:
+
+```bash
 a2a serve \
-  --host 127.0.0.1 --port 8080 \
+  --host 0.0.0.0 --port 8443 \
   --deployment-mode prod \
   --secure-required \
   --tls-cert-file /etc/a2a/tls/server.crt \
   --tls-key-file /etc/a2a/tls/server.key \
-  --replay-db-file /var/lib/a2a/replay.db \
+  --tls-ca-file /etc/a2a/tls/ca.crt \
+  --tls-require-client-cert \
+  --replay-redis-url redis://redis.internal:6379/0 \
   --trusted-signing-keys-file trusted_signing_keys.json \
   --decrypt-keys-file decrypt_keys.json \
   --agent-kid-map-file agent_kid_map.json \
-  --allowed-agent did:key:sender-agent \
-  --audit-log-file /tmp/a2a_audit.log
-```
-
-Key lifecycle controls (rotation + revocation):
-
-```bash
-# key_registry.json may include:
-# trusted_signing_keys, required_kid_by_agent, allowed_kids_by_agent,
-# revoked_kids, kid_not_after, decrypt_private_keys
-a2a serve \
-  --host 127.0.0.1 --port 8080 \
-  --deployment-mode prod \
-  --tls-cert-file /etc/a2a/tls/server.crt \
-  --tls-key-file /etc/a2a/tls/server.key \
-  --replay-db-file /var/lib/a2a/replay.db \
-  --key-registry-file key_registry.json
-```
-
-Secure sender mode (`enc+sig+replay` auto-applied):
-
-```bash
-a2a send \
-  --url https://127.0.0.1:8080/a2a \
-  --ct task.v1 \
-  --payload-file a2a_sdl/examples/task_min_payload.json \
-  --secure \
-  --sign-key .keys/ed25519_private.pem \
-  --sign-kid did:key:sender-agent#sig1 \
-  --encrypt-kid did:key:server#enc1 \
-  --encrypt-pub .keys/x25519_public.b64
-```
-
-Production hardening knobs:
-
-```bash
-a2a serve \
-  --deployment-mode prod \
-  --tls-cert-file /etc/a2a/tls/server.crt \
-  --tls-key-file /etc/a2a/tls/server.key \
-  --tls-ca-file /etc/a2a/tls/ca.crt \
-  --tls-require-client-cert \
-  --replay-db-file /var/lib/a2a/replay.db \
-  --admission-max-concurrent 256 \
-  --admission-rate-rps 400 \
-  --admission-burst 800
-```
-
-Distributed replay on Redis:
-
-```bash
-a2a serve \
-  --deployment-mode prod \
-  --tls-cert-file /etc/a2a/tls/server.crt \
-  --tls-key-file /etc/a2a/tls/server.key \
-  --replay-redis-url redis://redis.internal:6379/0 \
-  --replay-redis-prefix a2a:replay:prod
+  --admin-token '<strong-token>'
 ```
 
 Sender-side HTTPS + mTLS:
@@ -221,65 +130,21 @@ Sender-side HTTPS + mTLS:
 a2a send \
   --url https://a2a.example.com/a2a \
   --ct task.v1 \
-  --payload-file a2a_sdl/examples/task_min_payload.json \
+  --payload-file task.json \
   --tls-ca-file /etc/a2a/tls/ca.crt \
   --tls-client-cert-file /etc/a2a/tls/client.crt \
   --tls-client-key-file /etc/a2a/tls/client.key
 ```
 
-Operational observability endpoints:
+## Security and Trust Features
 
-```bash
-# Enable GET /healthz, /readyz, /metrics
-a2a serve --deployment-mode dev --allow-insecure-http --admin-endpoints
+- `--secure-required`: requires encrypted + signed + replay-protected inbound envelopes
+- Key lifecycle controls: required key per agent, rotation sets, revocation, key expiry
+- `trustsync.v1`: signed trust-registry discovery/proposal flow
+- `session.v1`: negotiated binding handshake with optional detached signature
+- Optional runtime migration policy: `--version-policy-file`
 
-# Protect /readyz and /metrics with a token
-a2a serve --deployment-mode dev --allow-insecure-http --admin-token secret123
-curl -H "Authorization: Bearer secret123" http://127.0.0.1:8080/readyz
-curl -H "Authorization: Bearer secret123" http://127.0.0.1:8080/metrics
-```
-
-## Transport Details
-
-- **HTTP**: reference request/response transport, retry/backoff support, content-type negotiation fallback, optional TLS/mTLS, and admission control.
-- **WS**: same protocol validation path as HTTP; protocol violations map to structured `error.v1`.
-- **IPC**: local framed transport (`uint32_be` + payload bytes), useful for same-host agent orchestration.
-
-All transports converge on shared envelope validation and handler semantics to keep behavior consistent.
-
-## Handler Extensibility (New)
-
-Two extensibility layers are built in:
-- **Tool registry for `toolcall.v1`**:
-  - `sys.ping`: liveness + echo payload
-  - `math.add`: numeric aggregation from `args.values`
-- **Content-type router**:
-  - default implementation for `task.v1`, `toolcall.v1`, `negotiation.v1`, `trustsync.v1`, `session.v1`
-  - custom content types can be registered at server startup
-
-Protocol metadata improvement:
-- response envelopes now advertise available tools in `cap.tools`
-- negotiation responses include `payload.available_tools`
-
-Example custom handler wiring:
-
-```bash
-a2a serve \
-  --host 127.0.0.1 --port 8080 \
-  --allow-handler-module-prefix myproject.handlers \
-  --handler-spec artifact.v1=myproject.handlers:artifact_handler
-```
-
-`artifact_handler(request)` must return a valid A2A response envelope.
-
-By default, tool execution is deny-by-default in `a2a serve`.
-Allow tools explicitly:
-
-```bash
-a2a serve --allow-tool sys.ping --allow-tool math.add
-```
-
-Fine-grained tool authorization policy file:
+Fine-grained tool authorization policy:
 
 ```json
 {
@@ -296,74 +161,24 @@ Fine-grained tool authorization policy file:
 a2a serve --tool-policy-file tool_policy.json
 ```
 
-Use `--unsafe-allow-unmanifested-handlers` only for trusted local development.
+## Transport and Extensibility
 
-## Security Model
+- HTTP transport: reference implementation with retries/backoff and negotiation fallback
+- WS transport: protocol-equivalent validation and error mapping
+- IPC transport: local framed transport (`uint32_be`)
+- Built-in handlers: `task.v1`, `toolcall.v1`, `negotiation.v1`, `trustsync.v1`, `session.v1`
+- Custom handlers: `--handler-spec <ct>=<module>:<callable>`
 
-`--secure-required` mode on server enforces all of:
-- encrypted payload (`enc`)
-- valid trusted signature (`sig`)
-- replay token with nonce + expiry (`replay`)
-- sender identity/key mapping and optional allowlisted agent IDs
+## Operations
 
-`--deployment-mode prod` behavior:
-- treats secure mode as required
-- requires TLS cert/key unless explicitly overridden with `--allow-insecure-http`
-- requires durable replay storage (`--replay-db-file`) unless overridden
+- Observability endpoints: `/healthz`, `/readyz`, `/metrics`
+- Audit chain: append-only hash chain with optional Ed25519 receipts
+- External audit anchoring: `--audit-anchor-url` (+ optional fail-closed mode)
 
-Operational components:
-- `ReplayCache` (memory), `SQLiteReplayCache` (durable), or `RedisReplayCache` (distributed) blocks duplicate nonce usage.
-- Audit chain persists tamper-evident events, can verify Ed25519 signatures over entries, and can anchor entry hashes to external HTTP(S) sinks.
-- Structured errors intentionally avoid leaking sensitive internals.
+## Advanced
 
-Trust lifecycle sync:
-
-- `trustsync.v1` supports `discover` snapshots and signed `propose` registry updates.
-- Configure update verification key with `--trust-sync-verify-key-file`.
-
-Session binding handshake:
-
-- `session.v1` establishes a negotiated binding ID over profile+nonce(+expiry).
-- Configure detached signature on binding acknowledgements with `--session-binding-signing-key-file`.
-
-Runtime migration/deprecation policy:
-
-- Load with `--version-policy-file`.
-- Supports min/max peer protocol bounds, required peer version presence, deprecation deadlines, and allowed content-type version ranges.
-
-Programmatic local IPC usage:
-
-```python
-from a2a_sdl.handlers import default_handler
-from a2a_sdl.transport_ipc import IPCServer, send_ipc
-from tests.test_helpers import make_task_envelope
-
-server = IPCServer("127.0.0.1", 9099, handler=default_handler)
-# run server.serve_forever() in a background thread/process
-response = send_ipc("127.0.0.1", 9099, make_task_envelope(), encoding="json")
-```
-
-Multi-buddy autonomous swarm (Codex-backed, A2A toolcall envelopes):
-
-```bash
-a2a swarm \
-  --goal "Drive protocol to near-final feature completeness." \
-  --ports 8211,8212 \
-  --rounds 8 \
-  --near-final-rounds 2 \
-  --workdir /root/crpt
-```
-
-Swarm report fields:
-- `converged=true, mode=near_final`: majority of buddies reported `near_final` for the configured streak.
-- `converged=true, mode=stabilized_working`: buddies remained `working` for multiple rounds with no major new feature movement.
-- `converged=false, mode=not_converged`: max rounds reached without either condition.
-
-Swarm behavior notes:
-- Each buddy runs as an A2A HTTP endpoint backed by a `codex exec` call.
-- Coordinator sends `toolcall.v1` requests round-by-round with handoff text chaining.
-- Near-final convergence uses majority voting across 2+ buddies.
-- If buddies stabilize in `working` state for repeated rounds, coordinator marks `stabilized_working` to avoid endless loops.
+- Multi-buddy Codex swarm orchestration is available via `a2a swarm` for iterative protocol work.
+- Versioning policy details: `docs/versioning-policy.md`
 
 ## Test
 
@@ -373,32 +188,19 @@ python3 -m unittest discover -s tests -v
 
 ## Release (Maintainers)
 
-Current Trusted Publisher configuration:
-1. PyPI project: `a2acrpt`
-2. GitHub repository: `psspssr/crpt`
-3. Workflow: `.github/workflows/publish-pypi.yml`
-4. Environment name: `pypi`
+Trusted publishing is configured through GitHub Actions (`publish-pypi.yml`) to PyPI project `a2acrpt`.
 
-Automated release:
-1. Bump version in `pyproject.toml`.
-2. Commit and push to `main`.
-3. Create and push a version tag (for example `v0.1.1`):
-   `git tag v0.1.1 && git push origin v0.1.1`
-4. GitHub Actions workflow `.github/workflows/publish-pypi.yml` builds and publishes to PyPI.
+Release flow:
 
-CI hardening workflow:
-- `.github/workflows/ci.yml` runs lint (`ruff`), type checks (`mypy`), unit tests (3.11/3.12), and validates that `v*` tags match `pyproject.toml` version.
+1. Bump version in `pyproject.toml`
+2. Merge to `main`
+3. Tag and push (for example `v0.1.1`)
 
-Manual local release check:
 ```bash
-python -m pip install -U build twine
-python -m build
-python -m twine check dist/*
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
-## Notes
+## Security Reporting
 
-- CBOR support requires `pip install -e .[cbor]`.
-- JSON Schema validation requires `pip install -e .[schema]`.
-- FastAPI server adapter requires `pip install -e .[http]`.
-- Versioning policy details: `docs/versioning-policy.md`.
+For potential vulnerabilities, use a private disclosure path (GitHub Security Advisory / private report) instead of a public issue.
