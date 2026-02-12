@@ -24,22 +24,24 @@ class ReplayCache:
         self.max_entries = max_entries
         self.ttl_seconds = ttl_seconds
         self._store: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self._lock = threading.Lock()
 
     def seen_or_add(self, agent_id: str, nonce: str, now: float | None = None) -> bool:
         ts = now if now is not None else time.time()
-        self._purge_expired(ts)
+        with self._lock:
+            self._purge_expired(ts)
 
-        key = (agent_id, nonce)
-        if key in self._store:
-            return True
+            key = (agent_id, nonce)
+            if key in self._store:
+                return True
 
-        self._store[key] = ts
-        self._store.move_to_end(key)
+            self._store[key] = ts
+            self._store.move_to_end(key)
 
-        while len(self._store) > self.max_entries:
-            self._store.popitem(last=False)
+            while len(self._store) > self.max_entries:
+                self._store.popitem(last=False)
 
-        return False
+            return False
 
     def _purge_expired(self, now: float) -> None:
         threshold = now - self.ttl_seconds

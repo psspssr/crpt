@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 from a2a_sdl.replay import ReplayCache
 from a2a_sdl.security import (
@@ -60,6 +61,18 @@ class SecurityTests(unittest.TestCase):
         self.assertTrue(cache.seen_or_add("a", "n1", now=0.1))
         self.assertFalse(cache.seen_or_add("a", "n2", now=0.2))
         self.assertFalse(cache.seen_or_add("a", "n3", now=2.0))
+
+    def test_replay_cache_thread_safety(self) -> None:
+        cache = ReplayCache(max_entries=1000, ttl_seconds=60)
+
+        def mark(_: int) -> bool:
+            return cache.seen_or_add("agent-a", "nonce-shared")
+
+        with ThreadPoolExecutor(max_workers=32) as executor:
+            results = list(executor.map(mark, range(128)))
+
+        self.assertEqual(results.count(False), 1)
+        self.assertEqual(results.count(True), 127)
 
 
 if __name__ == "__main__":

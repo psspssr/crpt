@@ -259,15 +259,6 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     )
 
     effective_replay_protection = bool(args.replay_protection or secure_policy_enabled or prod_mode)
-    if effective_replay_protection:
-        if args.replay_db_file:
-            replay_cache = SQLiteReplayCache(
-                args.replay_db_file,
-                max_entries=args.replay_max_entries,
-                ttl_seconds=args.replay_ttl,
-            )
-        else:
-            replay_cache = ReplayCache(max_entries=args.replay_max_entries, ttl_seconds=args.replay_ttl)
 
     security_policy = None
     if secure_policy_enabled:
@@ -371,6 +362,20 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         rate_limit_rps=max(0.0, float(args.admission_rate_rps)),
         burst=max(1, int(args.admission_burst)),
     )
+
+    try:
+        if effective_replay_protection:
+            if args.replay_db_file:
+                replay_cache = SQLiteReplayCache(
+                    args.replay_db_file,
+                    max_entries=args.replay_max_entries,
+                    ttl_seconds=args.replay_ttl,
+                )
+            else:
+                replay_cache = ReplayCache(max_entries=args.replay_max_entries, ttl_seconds=args.replay_ttl)
+    except Exception as exc:
+        print(f"failed to initialize replay cache: {exc}", file=sys.stderr)
+        return 2
 
     try:
         server = A2AHTTPServer(
