@@ -263,12 +263,12 @@ class CLITests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("failed to initialize server", stderr.getvalue())
 
-    def test_swarm_requires_three_ports(self) -> None:
+    def test_swarm_requires_minimum_two_ports(self) -> None:
         with redirect_stdout(io.StringIO()):
             with patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                code = main(["swarm", "--ports", "9001,9002"])
+                code = main(["swarm", "--ports", "9001"])
         self.assertEqual(code, 2)
-        self.assertIn("exactly 3 ports", stderr.getvalue())
+        self.assertIn("at least 2 ports", stderr.getvalue())
 
     def test_load_handler_spec_valid(self) -> None:
         ct, handler = _load_handler_spec("artifact.v1=json:loads")

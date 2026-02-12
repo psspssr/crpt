@@ -89,6 +89,28 @@ class SwarmTests(unittest.TestCase):
             for buddy in buddies:
                 buddy.stop()
 
+    def test_swarm_converges_with_two_buddies(self) -> None:
+        b1 = CodexBuddyServer(name="b1", host="127.0.0.1", port=0, backend=_FakeBackend(["near_final"]))
+        b2 = CodexBuddyServer(name="b2", host="127.0.0.1", port=0, backend=_FakeBackend(["near_final"]))
+
+        buddies = [b1, b2]
+        for buddy in buddies:
+            buddy.start()
+
+        try:
+            endpoints = [BuddyEndpoint(name=buddy.name, url=buddy.url) for buddy in buddies]
+            coordinator = SwarmCoordinator(endpoints, timeout_s=10.0, retry_attempts=0)
+            report = coordinator.run(
+                goal="Reach near_final",
+                max_rounds=2,
+                near_final_rounds=1,
+            )
+            self.assertTrue(report["converged"])
+            self.assertEqual(report["final_statuses"], ["near_final", "near_final"])
+        finally:
+            for buddy in buddies:
+                buddy.stop()
+
     @mock.patch("a2a_sdl.swarm.send_http", side_effect=TimeoutError("timeout"))
     def test_swarm_handles_transport_errors(self, _mock_send_http: mock.Mock) -> None:
         coordinator = SwarmCoordinator(

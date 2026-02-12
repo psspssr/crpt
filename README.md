@@ -21,7 +21,7 @@ This repository implements:
 - Secure policy mode for mandatory `enc+sig+replay`, key-based authz, and allowlisted agents
 - Tamper-evident hash-chained audit log with optional Ed25519-signed audit receipts
 - WebSocket transport processing now matches HTTP validation/security behavior with structured `error.v1` responses
-- Built-in 3-buddy swarm command (`a2a swarm`) that coordinates Codex buddies through A2A envelopes
+- Built-in multi-buddy swarm command (`a2a swarm`, 2+ buddies) that coordinates Codex buddies through A2A envelopes
 - Executable `toolcall.v1` path with built-in tools (`sys.ping`, `math.add`)
 - Pluggable request handlers via `a2a serve --handler-spec <ct>=<module>:<callable>`
 - Ingress hardening: oversized `Content-Length` rejected before body read
@@ -32,6 +32,7 @@ This repository implements:
 - Durable replay protection via optional SQLite-backed nonce cache (`--replay-db-file`)
 - Production transport controls: TLS/mTLS options and production deployment profile
 - Admission control with concurrency + token-bucket rate limiting
+- Optional admin observability endpoints (`/healthz`, `/readyz`, `/metrics`) with Prometheus-compatible metrics output
 - Audit signature verification support for signed audit chains
 - Runtime capability-version enforcement (`cap.a2a_sdl.v`) for peer compatibility checks
 
@@ -193,6 +194,18 @@ a2a serve \
   --admission-burst 800
 ```
 
+Operational observability endpoints:
+
+```bash
+# Enable GET /healthz, /readyz, /metrics
+a2a serve --deployment-mode dev --allow-insecure-http --admin-endpoints
+
+# Protect /readyz and /metrics with a token
+a2a serve --deployment-mode dev --allow-insecure-http --admin-token secret123
+curl -H "Authorization: Bearer secret123" http://127.0.0.1:8080/readyz
+curl -H "Authorization: Bearer secret123" http://127.0.0.1:8080/metrics
+```
+
 ## Transport Details
 
 - **HTTP**: reference request/response transport, retry/backoff support, content-type negotiation fallback, optional TLS/mTLS, and admission control.
@@ -265,12 +278,12 @@ server = IPCServer("127.0.0.1", 9099, handler=default_handler)
 response = send_ipc("127.0.0.1", 9099, make_task_envelope(), encoding="json")
 ```
 
-3-buddy autonomous swarm (Codex-backed, A2A toolcall envelopes):
+Multi-buddy autonomous swarm (Codex-backed, A2A toolcall envelopes):
 
 ```bash
 a2a swarm \
   --goal "Drive protocol to near-final feature completeness." \
-  --ports 8211,8212,8213 \
+  --ports 8211,8212 \
   --rounds 8 \
   --near-final-rounds 2 \
   --workdir /root/crpt
@@ -284,7 +297,7 @@ Swarm report fields:
 Swarm behavior notes:
 - Each buddy runs as an A2A HTTP endpoint backed by a `codex exec` call.
 - Coordinator sends `toolcall.v1` requests round-by-round with handoff text chaining.
-- Near-final convergence uses majority voting across buddies.
+- Near-final convergence uses majority voting across 2+ buddies.
 - If buddies stabilize in `working` state for repeated rounds, coordinator marks `stabilized_working` to avoid endless loops.
 
 ## Test

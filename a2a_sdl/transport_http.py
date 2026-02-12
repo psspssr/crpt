@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import socket
 import ssl
 import threading
@@ -70,6 +71,112 @@ class AdmissionController:
         self._semaphore.release()
 
 
+class ServerMetrics:
+    """Thread-safe operational counters exposed via admin endpoints."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._started_at = time.monotonic()
+        self._requests_total = 0
+        self._requests_ok_total = 0
+        self._requests_error_total = 0
+        self._admission_reject_total = 0
+        self._admission_reject_rate_limit_total = 0
+        self._admission_reject_concurrency_total = 0
+        self._decode_error_total = 0
+        self._validation_error_total = 0
+        self._handler_error_total = 0
+        self._inflight = 0
+
+    def on_request_start(self) -> None:
+        with self._lock:
+            self._requests_total += 1
+            self._inflight += 1
+
+    def on_request_end(self, response_envelope: dict[str, Any] | None) -> None:
+        with self._lock:
+            self._inflight = max(0, self._inflight - 1)
+            if isinstance(response_envelope, dict) and response_envelope.get("ct") != "error.v1":
+                self._requests_ok_total += 1
+            else:
+                self._requests_error_total += 1
+
+    def on_admission_reject(self, reason: str | None) -> None:
+        with self._lock:
+            self._admission_reject_total += 1
+            if reason == "rate_limit":
+                self._admission_reject_rate_limit_total += 1
+            elif reason == "concurrency_limit":
+                self._admission_reject_concurrency_total += 1
+
+    def on_decode_error(self) -> None:
+        with self._lock:
+            self._decode_error_total += 1
+
+    def on_validation_error(self) -> None:
+        with self._lock:
+            self._validation_error_total += 1
+
+    def on_handler_error(self) -> None:
+        with self._lock:
+            self._handler_error_total += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "requests_total": self._requests_total,
+                "requests_ok_total": self._requests_ok_total,
+                "requests_error_total": self._requests_error_total,
+                "admission_reject_total": self._admission_reject_total,
+                "admission_reject_rate_limit_total": self._admission_reject_rate_limit_total,
+                "admission_reject_concurrency_total": self._admission_reject_concurrency_total,
+                "decode_error_total": self._decode_error_total,
+                "validation_error_total": self._validation_error_total,
+                "handler_error_total": self._handler_error_total,
+                "inflight": self._inflight,
+                "uptime_s": round(max(0.0, time.monotonic() - self._started_at), 3),
+            }
+
+    def render_prometheus(self) -> str:
+        snap = self.snapshot()
+        lines = [
+            "# HELP a2a_requests_total Total A2A POST requests received.",
+            "# TYPE a2a_requests_total counter",
+            f"a2a_requests_total {snap['requests_total']}",
+            "# HELP a2a_requests_ok_total Successful (non-error envelope) requests.",
+            "# TYPE a2a_requests_ok_total counter",
+            f"a2a_requests_ok_total {snap['requests_ok_total']}",
+            "# HELP a2a_requests_error_total Error-envelope requests.",
+            "# TYPE a2a_requests_error_total counter",
+            f"a2a_requests_error_total {snap['requests_error_total']}",
+            "# HELP a2a_admission_reject_total Requests rejected by admission controller.",
+            "# TYPE a2a_admission_reject_total counter",
+            f"a2a_admission_reject_total {snap['admission_reject_total']}",
+            "# HELP a2a_admission_reject_rate_limit_total Requests rejected due to rate limit.",
+            "# TYPE a2a_admission_reject_rate_limit_total counter",
+            f"a2a_admission_reject_rate_limit_total {snap['admission_reject_rate_limit_total']}",
+            "# HELP a2a_admission_reject_concurrency_total Requests rejected due to concurrency limit.",
+            "# TYPE a2a_admission_reject_concurrency_total counter",
+            f"a2a_admission_reject_concurrency_total {snap['admission_reject_concurrency_total']}",
+            "# HELP a2a_decode_error_total Request decode failures.",
+            "# TYPE a2a_decode_error_total counter",
+            f"a2a_decode_error_total {snap['decode_error_total']}",
+            "# HELP a2a_validation_error_total Envelope validation/security failures.",
+            "# TYPE a2a_validation_error_total counter",
+            f"a2a_validation_error_total {snap['validation_error_total']}",
+            "# HELP a2a_handler_error_total Handler/runtime failures.",
+            "# TYPE a2a_handler_error_total counter",
+            f"a2a_handler_error_total {snap['handler_error_total']}",
+            "# HELP a2a_inflight_requests Current in-flight A2A requests.",
+            "# TYPE a2a_inflight_requests gauge",
+            f"a2a_inflight_requests {snap['inflight']}",
+            "# HELP a2a_uptime_seconds Server uptime in seconds.",
+            "# TYPE a2a_uptime_seconds gauge",
+            f"a2a_uptime_seconds {snap['uptime_s']}",
+        ]
+        return "\n".join(lines) + "\n"
+
+
 class A2AHTTPServer:
     """Threaded stdlib HTTP server for `/a2a` requests."""
 
@@ -88,6 +195,8 @@ class A2AHTTPServer:
         tls_ca_file: str | None = None,
         tls_require_client_cert: bool = False,
         admission_controller: AdmissionController | None = None,
+        admin_enabled: bool = False,
+        admin_token: str | None = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -100,9 +209,13 @@ class A2AHTTPServer:
         self.tls_ca_file = tls_ca_file
         self.tls_require_client_cert = tls_require_client_cert
         self.admission_controller = admission_controller
+        self.admin_enabled = admin_enabled
+        self.admin_token = admin_token
 
         needs_replay = enforce_replay or bool(security_policy and security_policy.require_replay)
         self.replay_cache = replay_cache or (ReplayCache() if needs_replay else None)
+        self._metrics = ServerMetrics()
+        self._ready = True
         self._validate_tls_config()
         self._server = self._build_server()
         self._wrap_server_socket_with_tls()
@@ -137,14 +250,79 @@ class A2AHTTPServer:
         security_policy = self.security_policy
         audit_chain = self.audit_chain
         admission_controller = self.admission_controller
+        admin_enabled = self.admin_enabled
+        admin_token = self.admin_token
+        metrics = self._metrics
+        server_ref = self
 
         class RequestHandler(BaseHTTPRequestHandler):
             _READ_TIMEOUT_S = 15.0
+
+            def do_GET(self) -> None:  # noqa: N802
+                if not admin_enabled:
+                    self.send_error(404, "Not Found")
+                    return
+
+                if self.path == "/healthz":
+                    payload: dict[str, Any] = {
+                        "status": "ok",
+                        "service": "a2a-sdl-http",
+                        "ts": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+                    }
+                    self._send_json(payload, status_code=200)
+                    return
+
+                if self.path in {"/readyz", "/metrics"} and not self._is_admin_authorized(admin_token):
+                    self._send_json({"error": "unauthorized"}, status_code=401)
+                    return
+
+                if self.path == "/readyz":
+                    snap = metrics.snapshot()
+                    ready_payload: dict[str, Any] = {
+                        "ready": bool(server_ref._ready),
+                        "secure_mode": bool(security_policy is not None),
+                        "replay_enforced": bool(enforce_replay),
+                        "tls_enabled": bool(server_ref.tls_certfile and server_ref.tls_keyfile),
+                        "admission_enabled": bool(admission_controller is not None),
+                        "metrics": snap,
+                    }
+                    self._send_json(ready_payload, status_code=200)
+                    return
+
+                if self.path == "/metrics":
+                    body = metrics.render_prometheus().encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; version=0.0.4")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+                self.send_error(404, "Not Found")
+
+            def _is_admin_authorized(self, token: str | None) -> bool:
+                if not token:
+                    return True
+                auth = self.headers.get("Authorization", "").strip()
+                if auth == f"Bearer {token}":
+                    return True
+                alt = self.headers.get("X-A2A-Admin-Token", "").strip()
+                return alt == token
+
+            def _send_json(self, payload: dict[str, Any], *, status_code: int = 200) -> None:
+                body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                self.send_response(status_code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
 
             def do_POST(self) -> None:  # noqa: N802
                 if self.path != "/a2a":
                     self.send_error(404, "Not Found")
                     return
+
+                metrics.on_request_start()
 
                 content_type = self.headers.get("Content-Type")
                 encoding = detect_encoding_from_content_type(content_type)
@@ -169,9 +347,11 @@ class A2AHTTPServer:
                         return
 
                 admission_acquired = False
+                response_envelope: dict[str, Any] | None = None
                 if admission_controller is not None:
                     allowed, reason = admission_controller.acquire()
                     if not allowed:
+                        metrics.on_admission_reject(reason)
                         response_envelope = make_error_response(
                             request=_fallback_request_envelope(),
                             code="BAD_REQUEST",
@@ -180,6 +360,7 @@ class A2AHTTPServer:
                             retryable=True,
                         )
                         _send_protocol_response(response_envelope, status_code=429)
+                        metrics.on_request_end(response_envelope)
                         return
                     admission_acquired = True
 
@@ -232,6 +413,7 @@ class A2AHTTPServer:
                     try:
                         request_envelope = decode_bytes(body, encoding=encoding)
                     except CodecError as exc:
+                        metrics.on_decode_error()
                         response_envelope = make_error_response(
                             request=_fallback_request_envelope(),
                             code="UNSUPPORTED_ENCODING",
@@ -259,6 +441,8 @@ class A2AHTTPServer:
                 finally:
                     if admission_acquired and admission_controller is not None:
                         admission_controller.release()
+                    if admission_controller is None or admission_acquired:
+                        metrics.on_request_end(response_envelope)
 
             def _process_request(self, request_envelope: dict[str, Any]) -> dict[str, Any]:
                 try:
@@ -270,8 +454,10 @@ class A2AHTTPServer:
                     elif enforce_replay and replay_cache is not None:
                         _enforce_replay(request_envelope, replay_cache)
                 except EnvelopeValidationError as exc:
+                    metrics.on_validation_error()
                     return _validation_error_response(request_envelope, exc)
                 except Exception as exc:
+                    metrics.on_validation_error()
                     return make_error_response(
                         request=request_envelope,
                         code="BAD_REQUEST",
@@ -283,12 +469,14 @@ class A2AHTTPServer:
                     validate_envelope(response_envelope)
                     return response_envelope
                 except EnvelopeValidationError as exc:
+                    metrics.on_handler_error()
                     return make_error_response(
                         request=request_envelope,
                         code="INTERNAL",
                         message=f"handler returned invalid envelope: {exc}",
                     )
                 except Exception as exc:
+                    metrics.on_handler_error()
                     return make_error_response(
                         request=request_envelope,
                         code="INTERNAL",
@@ -307,6 +495,7 @@ class A2AHTTPServer:
         self._server.serve_forever()
 
     def shutdown(self) -> None:
+        self._ready = False
         self._server.shutdown()
         self._server.server_close()
 

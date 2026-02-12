@@ -131,12 +131,14 @@ class CodexBuddyServer:
         message = str(args.get("message", "")).strip()
         goal = str(args.get("goal", "")).strip()
         round_index = int(args.get("round", 0)) if str(args.get("round", "")).isdigit() else 0
+        buddy_count = int(args.get("buddy_count", 3)) if str(args.get("buddy_count", "")).isdigit() else 3
 
         prompt = _build_buddy_prompt(
             name=self.name,
             goal=goal,
             message=message,
             round_index=round_index,
+            buddy_count=max(2, buddy_count),
             history=self._history[-6:],
         )
         raw = self.backend.run(prompt)
@@ -216,6 +218,7 @@ class SwarmCoordinator:
                         "goal": goal,
                         "round": round_index,
                         "message": message,
+                        "buddy_count": len(self.buddies),
                     },
                     "expect": {},
                 }
@@ -298,12 +301,13 @@ def _build_buddy_prompt(
     goal: str,
     message: str,
     round_index: int,
+    buddy_count: int,
     history: list[dict[str, Any]],
 ) -> str:
     history_json = json.dumps(history, ensure_ascii=False)
     return textwrap.dedent(
         f"""
-        You are {name}, one of three collaborating protocol agents.
+        You are {name}, one of {buddy_count} collaborating protocol agents.
         Objective: refine the A2A protocol/framework toward near-final feature completeness.
         Reply with JSON only and no markdown using this schema exactly:
         {{"status":"working|near_final","summary":"short","handoff":"next instruction for the next buddy"}}

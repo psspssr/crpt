@@ -84,6 +84,15 @@ def main(argv: list[str] | None = None) -> int:
         default=512,
         help="Admission burst size before throttling.",
     )
+    serve.add_argument(
+        "--admin-endpoints",
+        action="store_true",
+        help="Expose operational GET endpoints: /healthz, /readyz, /metrics",
+    )
+    serve.add_argument(
+        "--admin-token",
+        help="Optional shared token required for /readyz and /metrics (Authorization: Bearer <token>)",
+    )
     serve.add_argument("--secure-required", action="store_true", help="Require enc+sig+replay and authz policy")
     serve.add_argument(
         "--allowed-agent",
@@ -190,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
 
     send.set_defaults(func=_cmd_send)
 
-    swarm = subparsers.add_parser("swarm", help="Run 3 Codex buddies over A2A and iterate to near-final state")
+    swarm = subparsers.add_parser("swarm", help="Run Codex buddies over A2A and iterate to near-final state")
     swarm.add_argument(
         "--goal",
         default="Drive the A2A-SDL protocol/framework to near-final feature completeness.",
@@ -200,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     swarm.add_argument(
         "--ports",
         default="8211,8212,8213",
-        help="Comma-separated buddy ports (must be exactly 3 for this command)",
+        help="Comma-separated buddy ports (minimum 2 for feedback-loop operation)",
     )
     swarm.add_argument("--rounds", type=int, default=8, help="Maximum swarm rounds")
     swarm.add_argument("--near-final-rounds", type=int, default=2, help="Consecutive all-near_final rounds to stop")
@@ -362,6 +371,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         rate_limit_rps=max(0.0, float(args.admission_rate_rps)),
         burst=max(1, int(args.admission_burst)),
     )
+    admin_enabled = bool(args.admin_endpoints or args.admin_token)
 
     try:
         if effective_replay_protection:
@@ -391,6 +401,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             tls_ca_file=args.tls_ca_file,
             tls_require_client_cert=args.tls_require_client_cert,
             admission_controller=admission_controller,
+            admin_enabled=admin_enabled,
+            admin_token=args.admin_token,
         )
     except Exception as exc:
         if isinstance(replay_cache, SQLiteReplayCache):
@@ -399,6 +411,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         return 2
     scheme = "https" if args.tls_cert_file and args.tls_key_file else "http"
     print(f"serving on {scheme}://{args.host}:{args.port}/a2a")
+    if admin_enabled:
+        print(f"admin endpoints enabled on {scheme}://{args.host}:{args.port}/healthz")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -497,8 +511,8 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
         print("--ports must be a comma-separated list of integers", file=sys.stderr)
         return 2
 
-    if len(ports) != 3:
-        print("--ports must contain exactly 3 ports for 3 buddies", file=sys.stderr)
+    if len(ports) < 2:
+        print("--ports must contain at least 2 ports", file=sys.stderr)
         return 2
 
     buddies: list[CodexBuddyServer] = []
