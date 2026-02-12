@@ -33,6 +33,7 @@ This repository implements:
 - Production transport controls: TLS/mTLS options and production deployment profile
 - Admission control with concurrency + token-bucket rate limiting
 - Audit signature verification support for signed audit chains
+- Runtime capability-version enforcement (`cap.a2a_sdl.v`) for peer compatibility checks
 
 ## How It Works
 
@@ -50,7 +51,7 @@ Typical request flow:
 3. Optionally encrypt payload and attach replay nonce/expiry.
 4. Optionally sign envelope.
 5. Send over transport (`HTTP`, `WS`, or local `IPC`).
-6. Receiver validates envelope, security policy, replay cache, and schema.
+6. Receiver validates envelope, capability version compatibility, security policy, replay cache, and schema.
 7. Handler returns a typed response envelope (`toolresult.v1`, `task.v1`, or `error.v1`).
 
 ## Project Structure
@@ -167,7 +168,7 @@ Secure sender mode (`enc+sig+replay` auto-applied):
 
 ```bash
 a2a send \
-  --url http://127.0.0.1:8080/a2a \
+  --url https://127.0.0.1:8080/a2a \
   --ct task.v1 \
   --payload-file a2a_sdl/examples/task_min_payload.json \
   --secure \
@@ -177,9 +178,24 @@ a2a send \
   --encrypt-pub .keys/x25519_public.b64
 ```
 
+Production hardening knobs:
+
+```bash
+a2a serve \
+  --deployment-mode prod \
+  --tls-cert-file /etc/a2a/tls/server.crt \
+  --tls-key-file /etc/a2a/tls/server.key \
+  --tls-ca-file /etc/a2a/tls/ca.crt \
+  --tls-require-client-cert \
+  --replay-db-file /var/lib/a2a/replay.db \
+  --admission-max-concurrent 256 \
+  --admission-rate-rps 400 \
+  --admission-burst 800
+```
+
 ## Transport Details
 
-- **HTTP**: reference request/response transport, retry/backoff support, content-type negotiation fallback.
+- **HTTP**: reference request/response transport, retry/backoff support, content-type negotiation fallback, optional TLS/mTLS, and admission control.
 - **WS**: same protocol validation path as HTTP; protocol violations map to structured `error.v1`.
 - **IPC**: local framed transport (`uint32_be` + payload bytes), useful for same-host agent orchestration.
 
@@ -227,9 +243,14 @@ Use `--unsafe-allow-unmanifested-handlers` only for trusted local development.
 - replay token with nonce + expiry (`replay`)
 - sender identity/key mapping and optional allowlisted agent IDs
 
+`--deployment-mode prod` behavior:
+- treats secure mode as required
+- requires TLS cert/key unless explicitly overridden with `--allow-insecure-http`
+- requires durable replay storage (`--replay-db-file`) unless overridden
+
 Operational components:
-- `ReplayCache` blocks duplicate nonce usage.
-- Audit chain can persist tamper-evident event history and optional signed receipts.
+- `ReplayCache` (memory) or `SQLiteReplayCache` (durable) blocks duplicate nonce usage.
+- Audit chain persists tamper-evident events and can verify Ed25519 signatures over entries.
 - Structured errors intentionally avoid leaking sensitive internals.
 
 Programmatic local IPC usage:
