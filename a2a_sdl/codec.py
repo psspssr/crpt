@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from typing import Any
 
 from .utils import canonical_json_bytes
 
+cbor2: Any
 try:
-    import cbor2 as _cbor2_module
+    cbor2 = importlib.import_module("cbor2")
 except Exception:  # pragma: no cover - optional dependency
-    _cbor2_module = None
-
-cbor2: Any = _cbor2_module
+    cbor2 = None
 
 
 class CodecError(ValueError):

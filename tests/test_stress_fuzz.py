@@ -4,6 +4,7 @@ import copy
 import random
 import threading
 import time
+import urllib.error
 import unittest
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -73,8 +74,33 @@ class StressAndFuzzTests(unittest.TestCase):
             def send_one(i: int) -> str:
                 req = make_task_envelope()
                 req["id"] = f"load-{i}"
-                response = send_http(url, req, encoding="json", timeout=10.0, retry_attempts=1, retry_backoff_s=0.01)
-                return response["ct"]
+                last_exc: Exception | None = None
+                for attempt in range(4):
+                    try:
+                        response = send_http(
+                            url,
+                            req,
+                            encoding="json",
+                            timeout=10.0,
+                            retry_attempts=1,
+                            retry_backoff_s=0.01,
+                        )
+                        return response["ct"]
+                    except (
+                        urllib.error.URLError,
+                        ConnectionResetError,
+                        ConnectionAbortedError,
+                        BrokenPipeError,
+                        TimeoutError,
+                        OSError,
+                    ) as exc:
+                        last_exc = exc
+                        if attempt >= 3:
+                            raise
+                        time.sleep(0.01 * (2**attempt))
+                if last_exc is not None:
+                    raise last_exc
+                raise RuntimeError("send_one failed without exception")
 
             cts: list[str] = []
             with ThreadPoolExecutor(max_workers=24) as executor:

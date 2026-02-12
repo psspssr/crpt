@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 from typing import Any, Callable
 
 from .codec import CodecError, decode_bytes, encode_bytes
@@ -11,12 +12,11 @@ from .policy import SecurityPolicy, enforce_request_security
 from .replay import ReplayCache, ReplayCacheProtocol
 from .transport_http import _enforce_replay, _fallback_request_envelope, _validation_error_response
 
+websockets: Any
 try:
-    import websockets as _websockets_module
+    websockets = importlib.import_module("websockets")
 except Exception:  # pragma: no cover - optional dependency
-    _websockets_module = None
-
-websockets: Any = _websockets_module
+    websockets = None
 
 
 MessageHandler = Callable[[dict[str, Any]], dict[str, Any]]
