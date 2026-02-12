@@ -139,14 +139,28 @@ TRUSTSYNC_V1_SCHEMA: dict[str, Any] = {
     "required": ["op"],
     "properties": {
         "op": {"enum": ["discover", "propose"]},
+        "proposal_id": {"type": "string"},
         "merge": {"type": "boolean"},
         "registry": {"type": "object"},
         "signature": {"type": "string"},
+        "approvals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["approver", "signature"],
+                "properties": {
+                    "approver": {"type": "string"},
+                    "signature": {"type": "string"},
+                },
+            },
+        },
         "status": {"enum": ["snapshot", "accepted", "rejected"]},
         "message": {"type": "string"},
         "registry_hash": {"type": "string"},
         "snapshot": {"type": "object"},
         "source_agent": {"type": "string"},
+        "approved_by": {"type": "array", "items": {"type": "string"}},
+        "quorum": {"type": "object"},
     },
 }
 

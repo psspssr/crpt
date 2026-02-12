@@ -7,12 +7,15 @@ from .envelope import (
     make_error_response,
     validate_envelope,
 )
+from .handlers import TrustGovernancePolicy
 from .codec import decode_bytes, encode_bytes
+from .conformance import render_conformance_json, render_conformance_text, run_conformance_suite
 from .transport_http import send_http_with_auto_downgrade
 from .transport_ipc import IPCServer, send_ipc
 from .swarm import CodexBuddyServer, SwarmCoordinator
 from .audit import AuditChain, HTTPAuditAnchor, verify_audit_chain
 from .policy import SecurityPolicy, SecurityPolicyManager
+from .session import SessionBindingRecord, SessionBindingStore, build_session_binding_doc, compute_session_binding_id
 from .security import (
     decrypt_payload,
     encrypt_payload,
@@ -37,8 +40,12 @@ __all__ = [
     "derive_response_trace",
     "make_error_response",
     "validate_envelope",
+    "TrustGovernancePolicy",
     "decode_bytes",
     "encode_bytes",
+    "run_conformance_suite",
+    "render_conformance_text",
+    "render_conformance_json",
     "send_http_with_auto_downgrade",
     "send_ipc",
     "IPCServer",
@@ -49,6 +56,10 @@ __all__ = [
     "verify_audit_chain",
     "SecurityPolicy",
     "SecurityPolicyManager",
+    "SessionBindingRecord",
+    "SessionBindingStore",
+    "build_session_binding_doc",
+    "compute_session_binding_id",
     "RuntimeVersionPolicy",
     "decrypt_payload",
     "encrypt_payload",
@@ -64,4 +75,4 @@ __all__ = [
     "versioning_payload_metadata",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

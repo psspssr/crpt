@@ -6,11 +6,12 @@
 
 A2A-SDL is a production-oriented reference implementation of a self-describing agent-to-agent protocol with strict envelope validation, deterministic encoding, and optional cryptographic security.
 
-Published package: https://pypi.org/project/a2acrpt/ (current release: `0.1.0`)
+Published package: https://pypi.org/project/a2acrpt/ (current release: `0.2.0`)
 
 ## Project Status
 
 - Protocol version: `v1`
+- Wire specification: `docs/protocol-v1.md`
 - Package name: `a2acrpt`
 - Python: `>=3.11`
 - Scope: secure messaging envelopes and transport bindings (HTTP/WS/IPC), not a full agent platform
@@ -27,6 +28,43 @@ Published package: https://pypi.org/project/a2acrpt/ (current release: `0.1.0`)
 - HTTP/WS/IPC transport parity with structured protocol errors
 - Optional admin observability endpoints (`/healthz`, `/readyz`, `/metrics`)
 - Tamper-evident audit log with optional external hash anchoring
+
+## Protocol Spec And Conformance
+
+- Normative wire contract: `docs/protocol-v1.md`
+- Conformance runner: `a2a conformance`
+- Test categories:
+  - Golden vectors (valid flows)
+  - Negative vectors (expected validation failures)
+  - Failure mapping checks (`UNSUPPORTED_CT`, `UNSUPPORTED_ENCODING`, etc.)
+  - Transport load checks (concurrent roundtrip)
+
+Run full local conformance:
+
+```bash
+a2a conformance --transport all --mode all --format text
+```
+
+Run a targeted CI-style profile:
+
+```bash
+a2a conformance --transport http --mode secure --skip-load --format json
+```
+
+## Compatibility Matrix (CI)
+
+Conformance is enforced in CI across:
+
+- Python: `3.11`, `3.12`
+- Transports: `http`, `ipc`, `ws`
+- Modes: `dev`, `secure`
+
+Current matrix target:
+
+| Python | HTTP dev | HTTP secure | IPC dev | IPC secure | WS dev | WS secure |
+| --- | --- | --- | --- | --- | --- | --- |
+| 3.11 | yes | yes | yes | yes | yes | yes |
+| 3.12 | yes | yes | yes | yes | yes | yes |
 
 ## Install
 
@@ -184,6 +222,10 @@ a2a serve --tool-policy-file tool_policy.json
 
 ```bash
 python3 -m unittest discover -s tests -v
+```
+
+```bash
+a2a conformance --transport all --mode all --format text
 ```
 
 ## Release (Maintainers)

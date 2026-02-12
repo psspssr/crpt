@@ -12,8 +12,9 @@ from typing import Any
 
 from .audit import AuditChain, HTTPAuditAnchor
 from .codec import decode_bytes
+from .conformance import render_conformance_json, render_conformance_text, run_conformance_suite
 from .envelope import build_envelope, validate_envelope
-from .handlers import HandlerFn, ToolExecutionPolicy, make_default_handler
+from .handlers import HandlerFn, ToolExecutionPolicy, TrustGovernancePolicy, make_default_handler
 from .policy import SecurityPolicy, SecurityPolicyManager
 from .schema import get_builtin_descriptor
 from .security import (
@@ -23,6 +24,7 @@ from .security import (
     sign_envelope,
 )
 from .replay import RedisReplayCache, ReplayCache, SQLiteReplayCache
+from .session import SessionBindingStore
 from .swarm import BuddyEndpoint, CodexBackend, CodexBuddyServer, SwarmCoordinator
 from .transport_http import AdmissionController, A2AHTTPServer, send_http, send_http_with_auto_downgrade
 from .utils import json_dumps_pretty, new_message_id, sha256_prefixed
@@ -181,8 +183,32 @@ def main(argv: list[str] | None = None) -> int:
         help="Ed25519 public key path used to verify trustsync.v1 propose updates",
     )
     serve.add_argument(
+        "--trust-governance-file",
+        help=(
+            "JSON quorum policy for trustsync.v1 propose approvals "
+            "(approver_keys + threshold)"
+        ),
+    )
+    serve.add_argument(
         "--session-binding-signing-key-file",
         help="Ed25519 private key path used to sign session.v1 binding acknowledgements",
+    )
+    serve.add_argument(
+        "--session-binding-required",
+        action="store_true",
+        help="Require sec.session binding for non-exempt request content types.",
+    )
+    serve.add_argument(
+        "--session-binding-exempt-ct",
+        action="append",
+        default=[],
+        help="Content type exempt from session binding checks (repeatable).",
+    )
+    serve.add_argument(
+        "--session-binding-max-entries",
+        type=int,
+        default=10000,
+        help="Maximum active session bindings retained in memory.",
     )
     serve.add_argument(
         "--handler-spec",
@@ -243,6 +269,8 @@ def main(argv: list[str] | None = None) -> int:
     send.add_argument("--encrypt-pub", help="Recipient X25519 public key value (PEM or b64 raw)")
     send.add_argument("--secure", action="store_true", help="Enforce enc+sig+replay on outbound message")
     send.add_argument("--replay-ttl-s", type=int, default=300, help="Replay expiration seconds when --secure is set")
+    send.add_argument("--session-binding-id", help="Attach sec.session.binding_id to bind request to an active session")
+    send.add_argument("--session-binding-exp", help="Optional sec.session.exp timestamp (RFC3339)")
 
     send.set_defaults(func=_cmd_send)
 
@@ -263,6 +291,46 @@ def main(argv: list[str] | None = None) -> int:
     swarm.add_argument("--buddy-timeout", type=int, default=120, help="Per-buddy codex exec timeout seconds")
     swarm.add_argument("--workdir", default=".", help="Codex buddy working directory")
     swarm.set_defaults(func=_cmd_swarm)
+
+    conformance = subparsers.add_parser("conformance", help="Run protocol conformance suite")
+    conformance.add_argument(
+        "--transport",
+        action="append",
+        choices=["all", "core", "http", "ipc", "ws"],
+        default=[],
+        help="Transport profile to test (repeatable). Defaults to all.",
+    )
+    conformance.add_argument(
+        "--mode",
+        action="append",
+        choices=["all", "dev", "secure"],
+        default=[],
+        help="Security mode profile to test (repeatable). Defaults to all.",
+    )
+    conformance.add_argument(
+        "--skip-load",
+        action="store_true",
+        help="Skip concurrent load scenarios.",
+    )
+    conformance.add_argument(
+        "--load-requests",
+        type=int,
+        default=24,
+        help="Number of requests for each load scenario.",
+    )
+    conformance.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="Per-request timeout in seconds for networked conformance cases.",
+    )
+    conformance.add_argument(
+        "--format",
+        choices=["text", "json"],
+        default="text",
+        help="Output format.",
+    )
+    conformance.set_defaults(func=_cmd_conformance)
 
     args = parser.parse_args(argv)
     return args.func(args)
@@ -321,11 +389,13 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         or args.revoked_kids_file
         or args.kid_not_after_file
         or args.allowed_agent
+        or args.session_binding_required
     )
 
     effective_replay_protection = bool(args.replay_protection or secure_policy_enabled or prod_mode)
 
     security_policy: SecurityPolicy | None = None
+    session_binding_store = SessionBindingStore(max_entries=max(1, int(args.session_binding_max_entries)))
     if secure_policy_enabled:
         try:
             key_registry = _load_key_registry(args.key_registry_file) if args.key_registry_file else {}
@@ -362,6 +432,14 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             print(f"failed to load secure policy files: {exc}", file=sys.stderr)
             return 2
 
+        if args.session_binding_required and not trusted_signing_keys:
+            print(
+                "--session-binding-required needs trusted signing keys "
+                "(--trusted-signing-keys-file or --key-registry-file)",
+                file=sys.stderr,
+            )
+            return 2
+
         if effective_secure_required and (not trusted_signing_keys or not decrypt_private_keys):
             print(
                 "--secure-required needs --trusted-signing-keys-file and --decrypt-keys-file",
@@ -369,6 +447,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             )
             return 2
 
+        exempt_ct = set(args.session_binding_exempt_ct)
+        exempt_ct.update({"session.v1", "error.v1", "negotiation.v1"})
         security_policy = SecurityPolicy(
             require_mode="enc+sig" if effective_secure_required else None,
             require_replay=effective_secure_required,
@@ -379,6 +459,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             revoked_kids=revoked_kids,
             kid_not_after=kid_not_after,
             decrypt_private_keys=decrypt_private_keys,
+            require_session_binding=bool(args.session_binding_required),
+            session_binding_store=session_binding_store,
+            session_binding_exempt_ct=exempt_ct,
         )
 
     trust_policy_manager = SecurityPolicyManager(security_policy) if security_policy is not None else None
@@ -389,6 +472,24 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         except Exception as exc:
             print(f"failed to load trust sync verify key: {exc}", file=sys.stderr)
             return 2
+
+    trust_governance_policy = None
+    if args.trust_governance_file:
+        try:
+            trust_governance_policy = _load_trust_governance_policy(args.trust_governance_file)
+        except Exception as exc:
+            print(f"failed to load trust governance policy: {exc}", file=sys.stderr)
+            return 2
+
+    if trust_governance_policy is not None and trust_sync_verify_key is not None:
+        print(
+            "use either --trust-governance-file or --trust-sync-verify-key-file, not both",
+            file=sys.stderr,
+        )
+        return 2
+
+    if trust_policy_manager is None and (trust_governance_policy is not None or trust_sync_verify_key is not None):
+        trust_policy_manager = SecurityPolicyManager(SecurityPolicy())
 
     session_binding_signing_key = None
     if args.session_binding_signing_key_file:
@@ -472,7 +573,9 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         tool_execution_policy=tool_policy,
         trust_policy_manager=trust_policy_manager,
         trust_update_verify_key=trust_sync_verify_key,
+        trust_governance_policy=trust_governance_policy,
         session_binding_signing_key=session_binding_signing_key,
+        session_binding_store=session_binding_store,
     )
     admission_controller = AdmissionController(
         max_concurrent=max(1, int(args.admission_max_concurrent)),
@@ -602,6 +705,18 @@ def _cmd_send(args: argparse.Namespace) -> int:
             sign_key_value = _load_key_material(args.sign_key)
             sign_envelope(envelope, sign_key_value, kid=args.sign_kid)
 
+    if args.session_binding_id:
+        sec = envelope.setdefault("sec", {})
+        if not isinstance(sec, dict):
+            sec = {}
+            envelope["sec"] = sec
+        if sec.get("mode") is None:
+            sec["mode"] = "none"
+        session_block: dict[str, str] = {"binding_id": args.session_binding_id}
+        if args.session_binding_exp:
+            session_block["exp"] = args.session_binding_exp
+        sec["session"] = session_block
+
     validate_envelope(envelope, validate_payload_schema=not args.encrypt_pub)
 
     send_fn = send_http_with_auto_downgrade if args.auto_negotiate else send_http
@@ -656,6 +771,26 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
     finally:
         for buddy in buddies:
             buddy.stop()
+
+
+def _cmd_conformance(args: argparse.Namespace) -> int:
+    try:
+        report = run_conformance_suite(
+            transports=args.transport,
+            modes=args.mode,
+            include_load=not bool(args.skip_load),
+            load_requests=max(1, int(args.load_requests)),
+            timeout_s=max(0.1, float(args.timeout)),
+        )
+    except Exception as exc:
+        print(f"failed to run conformance suite: {exc}", file=sys.stderr)
+        return 2
+
+    if args.format == "json":
+        print(render_conformance_json(report))
+    else:
+        print(render_conformance_text(report))
+    return 0 if bool(report.get("passed")) else 1
 
 
 def _load_payload(payload_file: str | None, payload_json: str | None) -> Any:
@@ -874,6 +1009,31 @@ def _load_key_registry(path: str) -> dict[str, Any]:
         }
 
     return registry
+
+
+def _load_trust_governance_policy(path: str) -> TrustGovernancePolicy:
+    content = pathlib.Path(path).read_text(encoding="utf-8")
+    decoded = json.loads(content)
+    if not isinstance(decoded, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+
+    approver_keys_raw = decoded.get("approver_keys")
+    if not isinstance(approver_keys_raw, dict) or not approver_keys_raw:
+        raise ValueError("approver_keys must be a non-empty object")
+    approver_keys: dict[str, str] = {}
+    for approver, key in approver_keys_raw.items():
+        if not isinstance(approver, str) or not approver:
+            raise ValueError("approver_keys keys must be non-empty strings")
+        if not isinstance(key, str) or not key:
+            raise ValueError("approver_keys values must be non-empty strings")
+        approver_keys[approver] = key
+
+    threshold_raw = decoded.get("threshold", 1)
+    if not isinstance(threshold_raw, int):
+        raise ValueError("threshold must be an integer")
+    policy = TrustGovernancePolicy(approver_keys=approver_keys, threshold=threshold_raw)
+    policy.validate()
+    return policy
 
 
 def _close_replay_cache(replay_cache: ReplayCache | SQLiteReplayCache | RedisReplayCache | None) -> None:

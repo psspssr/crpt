@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from a2a_sdl.cli import _load_handler_spec, _load_key_registry, _load_payload, main
+from a2a_sdl.cli import _load_handler_spec, _load_key_registry, _load_payload, _load_trust_governance_policy, main
 from a2a_sdl.envelope import build_envelope
 from a2a_sdl.schema import get_builtin_descriptor
 
@@ -15,6 +16,16 @@ class CLITests(unittest.TestCase):
     def test_load_payload_requires_one_input(self) -> None:
         with self.assertRaises(ValueError):
             _load_payload(None, None)
+
+    def test_load_trust_governance_policy(self) -> None:
+        with tempfile.NamedTemporaryFile("w+", suffix=".json") as handle:
+            handle.write(
+                '{"approver_keys":{"did:key:ops-a":"pub-a","did:key:ops-b":"pub-b"},"threshold":2}'
+            )
+            handle.flush()
+            policy = _load_trust_governance_policy(handle.name)
+        self.assertEqual(policy.threshold, 2)
+        self.assertIn("did:key:ops-a", policy.approver_keys)
 
     def test_send_passes_timeout_and_retry_options(self) -> None:
         captured: dict[str, object] = {}
@@ -191,6 +202,57 @@ class CLITests(unittest.TestCase):
         self.assertTrue(isinstance(sec.get("replay"), dict))
         self.assertEqual(sec["sig"]["alg"], "ed25519")
 
+    def test_send_attaches_session_binding(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_send_http(url: str, envelope: dict, **kwargs):
+            _ = url, kwargs
+            captured["envelope"] = envelope
+            return build_envelope(
+                msg_type="res",
+                from_identity=envelope["to"],
+                to_identity=envelope["from"],
+                content_type="error.v1",
+                payload={
+                    "code": "BAD_REQUEST",
+                    "message": "stub",
+                    "details": {},
+                    "retryable": False,
+                },
+                schema=get_builtin_descriptor("error.v1"),
+            )
+
+        payload_json = (
+            '{"kind":"task.v1","goal":"x","inputs":{},"constraints":{"time_budget_s":1,'
+            '"compute_budget":"low","safety":{}},"deliverables":[{"type":"text",'
+            '"description":"d"}],"acceptance":["ok"],"context":{}}'
+        )
+
+        argv = [
+            "send",
+            "--url",
+            "http://127.0.0.1:9999/a2a",
+            "--ct",
+            "task.v1",
+            "--payload-json",
+            payload_json,
+            "--session-binding-id",
+            "sha256:binding-123",
+            "--session-binding-exp",
+            "2099-01-01T00:00:00Z",
+        ]
+
+        with patch("a2a_sdl.cli.send_http", side_effect=fake_send_http):
+            with redirect_stdout(io.StringIO()):
+                code = main(argv)
+
+        self.assertEqual(code, 0)
+        envelope = captured["envelope"]
+        assert isinstance(envelope, dict)
+        sec = envelope["sec"]
+        self.assertEqual(sec["session"]["binding_id"], "sha256:binding-123")
+        self.assertEqual(sec["session"]["exp"], "2099-01-01T00:00:00Z")
+
     def test_send_passes_tls_options(self) -> None:
         captured: dict[str, object] = {}
 
@@ -251,6 +313,33 @@ class CLITests(unittest.TestCase):
                 code = main(["serve", "--secure-required"])
         self.assertEqual(code, 2)
         self.assertIn("--secure-required needs", stderr.getvalue())
+
+    def test_serve_rejects_mixed_trustsync_modes(self) -> None:
+        with tempfile.NamedTemporaryFile("w+", suffix=".json") as policy_file:
+            policy_file.write('{"approver_keys":{"did:key:ops-a":"pub-a"},"threshold":1}')
+            policy_file.flush()
+            with redirect_stdout(io.StringIO()):
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    code = main(
+                        [
+                            "serve",
+                            "--deployment-mode",
+                            "dev",
+                            "--trust-governance-file",
+                            policy_file.name,
+                            "--trust-sync-verify-key-file",
+                            "pub-key",
+                        ]
+                    )
+        self.assertEqual(code, 2)
+        self.assertIn("use either --trust-governance-file or --trust-sync-verify-key-file", stderr.getvalue())
+
+    def test_serve_session_binding_required_needs_trusted_keys(self) -> None:
+        with redirect_stdout(io.StringIO()):
+            with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                code = main(["serve", "--session-binding-required"])
+        self.assertEqual(code, 2)
+        self.assertIn("--session-binding-required needs trusted signing keys", stderr.getvalue())
 
     def test_serve_prod_requires_tls_by_default(self) -> None:
         with tempfile.NamedTemporaryFile("w+", suffix=".json") as trusted, tempfile.NamedTemporaryFile(
@@ -327,6 +416,25 @@ class CLITests(unittest.TestCase):
                 code = main(["swarm", "--ports", "9001"])
         self.assertEqual(code, 2)
         self.assertIn("at least 2 ports", stderr.getvalue())
+
+    def test_conformance_command_outputs_json_report(self) -> None:
+        with redirect_stdout(io.StringIO()) as stdout:
+            code = main(
+                [
+                    "conformance",
+                    "--transport",
+                    "core",
+                    "--mode",
+                    "dev",
+                    "--skip-load",
+                    "--format",
+                    "json",
+                ]
+            )
+        self.assertEqual(code, 0)
+        report = json.loads(stdout.getvalue())
+        self.assertTrue(report["passed"])
+        self.assertEqual(report["summary"]["failed"], 0)
 
     def test_load_handler_spec_valid(self) -> None:
         ct, handler = _load_handler_spec("artifact.v1=json:loads")

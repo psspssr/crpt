@@ -61,6 +61,60 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 
+  conformance_matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+        transport: ["http", "ipc", "ws"]
+        mode: ["dev", "secure"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[full]"
+
+      - name: Run conformance profile
+        run: |
+          python -m a2a_sdl.cli conformance \
+            --transport "${{ matrix.transport }}" \
+            --mode "${{ matrix.mode }}" \
+            --skip-load \
+            --format text
+
+  conformance_load:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[full]"
+
+      - name: Run load conformance sweep
+        run: |
+          python -m a2a_sdl.cli conformance \
+            --transport all \
+            --mode dev \
+            --load-requests 24 \
+            --format text
+
   validate_tag_version:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest

@@ -12,12 +12,18 @@ from a2a_sdl.security import (
     generate_x25519_keypair,
     sign_envelope,
 )
+from a2a_sdl.session import SessionBindingStore
 
 from tests.test_helpers import make_task_envelope
 
 
 class SecurityPolicyTests(unittest.TestCase):
-    def _make_secure_request(self):
+    def _make_secure_request(
+        self,
+        *,
+        session_binding_id: str | None = None,
+        session_exp: str | None = None,
+    ):
         env = make_task_envelope()
         env["from"]["agent_id"] = "did:key:agent-a"
 
@@ -30,10 +36,16 @@ class SecurityPolicyTests(unittest.TestCase):
         )
 
         exp = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).replace(microsecond=0)
-        env.setdefault("sec", {})["replay"] = {
+        sec = env.setdefault("sec", {})
+        sec["replay"] = {
             "nonce": "nonce-1",
             "exp": exp.isoformat().replace("+00:00", "Z"),
         }
+        if session_binding_id is not None:
+            sec_session: dict[str, str] = {"binding_id": session_binding_id}
+            if session_exp is not None:
+                sec_session["exp"] = session_exp
+            sec["session"] = sec_session
         sign_envelope(env, signing_keys["private_key_b64"], kid="did:key:agent-a#sig1")
 
         policy = SecurityPolicy(
@@ -116,6 +128,56 @@ class SecurityPolicyTests(unittest.TestCase):
         snapshot = manager.snapshot()
         self.assertIn("kid-1", snapshot["trusted_signing_keys"])
         self.assertIn("kid-old", snapshot["revoked_kids"])
+
+    def test_session_binding_required_rejects_missing_sec_session(self) -> None:
+        env, policy = self._make_secure_request()
+        policy.require_session_binding = True
+        policy.session_binding_store = SessionBindingStore()
+
+        with self.assertRaises(EnvelopeValidationError):
+            enforce_request_security(env, policy, ReplayCache())
+
+    def test_session_binding_required_accepts_registered_binding(self) -> None:
+        exp = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).replace(microsecond=0)
+        exp_str = exp.isoformat().replace("+00:00", "Z")
+        env, policy = self._make_secure_request(
+            session_binding_id="sha256:binding-1",
+            session_exp=exp_str,
+        )
+
+        store = SessionBindingStore()
+        store.register(
+            binding_id="sha256:binding-1",
+            from_agent=env["from"]["agent_id"],
+            to_agent=env["to"]["agent_id"],
+            expires=exp_str,
+            profile={"ct": ["task.v1"], "mode": "enc+sig"},
+        )
+        policy.require_session_binding = True
+        policy.session_binding_store = store
+
+        enforce_request_security(env, policy, ReplayCache())
+
+    def test_session_binding_required_rejects_unknown_binding(self) -> None:
+        exp = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=5)).replace(microsecond=0)
+        exp_str = exp.isoformat().replace("+00:00", "Z")
+        env, policy = self._make_secure_request(
+            session_binding_id="sha256:unknown",
+            session_exp=exp_str,
+        )
+        policy.require_session_binding = True
+        policy.session_binding_store = SessionBindingStore()
+
+        with self.assertRaises(EnvelopeValidationError):
+            enforce_request_security(env, policy, ReplayCache())
+
+    def test_session_binding_exempt_content_type_skips_requirement(self) -> None:
+        env, policy = self._make_secure_request()
+        policy.require_session_binding = True
+        policy.session_binding_store = SessionBindingStore()
+        policy.session_binding_exempt_ct = {"task.v1", "session.v1", "error.v1"}
+
+        enforce_request_security(env, policy, ReplayCache())
 
 
 if __name__ == "__main__":

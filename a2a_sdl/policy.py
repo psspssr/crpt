@@ -11,6 +11,7 @@ from .envelope import EnvelopeValidationError
 from .replay import ReplayCacheProtocol
 from .schema import SchemaValidationError, validate_payload
 from .security import SecurityError, decrypt_payload, verify_envelope_signature
+from .session import SessionBindingStoreProtocol
 from .utils import canonical_json_bytes, now_iso_utc, sha256_prefixed
 
 
@@ -27,6 +28,11 @@ class SecurityPolicy:
     revoked_kids: set[str] = field(default_factory=set)
     kid_not_after: dict[str, str] = field(default_factory=dict)
     decrypt_private_keys: dict[str, str] = field(default_factory=dict)
+    require_session_binding: bool = False
+    session_binding_store: SessionBindingStoreProtocol | None = None
+    session_binding_exempt_ct: set[str] = field(
+        default_factory=lambda: {"session.v1", "error.v1", "negotiation.v1"}
+    )
 
 
 @dataclass(slots=True)
@@ -36,6 +42,7 @@ class SecurityPolicyManager:
     policy: SecurityPolicy
     _updated_at: str = field(default_factory=now_iso_utc, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _applied_proposals: set[str] = field(default_factory=set, init=False, repr=False)
 
     def snapshot(self, *, include_private: bool = False) -> dict[str, Any]:
         with self._lock:
@@ -80,6 +87,18 @@ class SecurityPolicyManager:
                 self.policy.decrypt_private_keys = dict(normalized["decrypt_private_keys"])
             self._updated_at = now_iso_utc()
         return self.snapshot_hash(include_private=False)
+
+    def has_applied_proposal(self, proposal_id: str) -> bool:
+        if not isinstance(proposal_id, str) or not proposal_id:
+            return False
+        with self._lock:
+            return proposal_id in self._applied_proposals
+
+    def mark_applied_proposal(self, proposal_id: str) -> None:
+        if not isinstance(proposal_id, str) or not proposal_id:
+            return
+        with self._lock:
+            self._applied_proposals.add(proposal_id)
 
 
 
@@ -138,6 +157,9 @@ def enforce_request_security(
 
     if policy.require_replay:
         _enforce_replay(envelope, replay_cache)
+
+    if policy.require_session_binding:
+        _enforce_session_binding(envelope, policy)
 
     if mode in {"enc", "enc+sig"}:
         _decrypt_payload(envelope, policy)
@@ -213,6 +235,54 @@ def _decrypt_payload(envelope: dict[str, Any], policy: SecurityPolicy) -> None:
         decrypt_payload(envelope, policy.decrypt_private_keys[selected_kid], kid=selected_kid)
     except SecurityError as exc:
         raise EnvelopeValidationError(f"decryption failed: {exc}") from exc
+
+
+def _enforce_session_binding(envelope: dict[str, Any], policy: SecurityPolicy) -> None:
+    content_type = envelope.get("ct")
+    if isinstance(content_type, str) and content_type in policy.session_binding_exempt_ct:
+        return
+
+    if not isinstance(content_type, str):
+        raise EnvelopeValidationError("ct must be a string for session binding checks")
+
+    store = policy.session_binding_store
+    if store is None:
+        raise EnvelopeValidationError("security policy requires session binding store")
+
+    sec = envelope.get("sec")
+    if not isinstance(sec, dict):
+        raise EnvelopeValidationError("security policy requires sec block")
+
+    session = sec.get("session")
+    if not isinstance(session, dict):
+        raise EnvelopeValidationError("security policy requires sec.session")
+
+    binding_id = session.get("binding_id")
+    if not isinstance(binding_id, str) or not binding_id:
+        raise EnvelopeValidationError("sec.session.binding_id must be a non-empty string")
+
+    exp = session.get("exp")
+    if exp is not None:
+        if not isinstance(exp, str):
+            raise EnvelopeValidationError("sec.session.exp must be a string when present")
+        if _parse_iso_utc(exp) <= dt.datetime.now(dt.timezone.utc):
+            raise EnvelopeValidationError("sec.session expired")
+
+    from_identity = envelope.get("from")
+    to_identity = envelope.get("to")
+    from_agent = (
+        str(from_identity.get("agent_id", "did:key:unknown"))
+        if isinstance(from_identity, dict)
+        else "did:key:unknown"
+    )
+    to_agent = (
+        str(to_identity.get("agent_id", "did:key:unknown"))
+        if isinstance(to_identity, dict)
+        else "did:key:unknown"
+    )
+
+    if not store.is_active(binding_id=binding_id, from_agent=from_agent, to_agent=to_agent):
+        raise EnvelopeValidationError("security policy rejects unknown or expired session binding")
 
 
 def _parse_iso_utc(value: str) -> dt.datetime:

@@ -12,6 +12,7 @@ from typing import Any
 from .constants import DEFAULT_LIMITS, PROTOCOL_VERSION, SUPPORTED_CONTENT_TYPES
 from .envelope import build_envelope, derive_response_trace, make_error_response
 from .policy import SecurityPolicyManager
+from .session import SessionBindingStoreProtocol, build_session_binding_doc, compute_session_binding_id
 from .schema import get_builtin_descriptor
 from .security import SecurityError, sign_detached_json, verify_detached_json
 from .utils import canonical_json_bytes, sha256_prefixed
@@ -59,6 +60,22 @@ class ToolExecutionPolicy:
                 return False, f"tool '{tool_name}' requires scope '{required_scope}'"
 
         return True, None
+
+
+@dataclass(frozen=True, slots=True)
+class TrustGovernancePolicy:
+    """Quorum-based approval policy for trustsync propose operations."""
+
+    approver_keys: dict[str, str]
+    threshold: int = 1
+
+    def validate(self) -> None:
+        if not self.approver_keys:
+            raise ValueError("trust governance approver_keys cannot be empty")
+        if self.threshold < 1:
+            raise ValueError("trust governance threshold must be >= 1")
+        if self.threshold > len(self.approver_keys):
+            raise ValueError("trust governance threshold cannot exceed approver key count")
 
 
 class ToolRegistry:
@@ -285,6 +302,7 @@ def _make_trustsync_handler(
     tools: list[str],
     policy_manager: SecurityPolicyManager | None,
     update_verify_key: str | None,
+    governance_policy: TrustGovernancePolicy | None,
 ) -> HandlerFn:
     def _handle_trustsync(request: dict[str, Any]) -> dict[str, Any]:
         payload_any = request.get("payload")
@@ -349,11 +367,11 @@ def _make_trustsync_handler(
                 trace=derive_response_trace(request.get("trace")),
             )
 
-        if update_verify_key is None:
+        if update_verify_key is None and governance_policy is None:
             result_payload = {
                 "op": "propose",
                 "status": "rejected",
-                "message": "trust update verify key is not configured",
+                "message": "trust update verification is not configured",
                 "source_agent": source_agent,
             }
             return build_envelope(
@@ -368,19 +386,59 @@ def _make_trustsync_handler(
             )
 
         registry = payload.get("registry")
-        signature = payload.get("signature")
         merge = bool(payload.get("merge", True))
-        if not isinstance(registry, dict) or not isinstance(signature, str) or not signature:
+        proposal_id_raw = payload.get("proposal_id")
+        if not isinstance(registry, dict):
             return make_error_response(
                 request=request,
                 code="BAD_REQUEST",
-                message="trustsync.v1 propose requires registry object and signature string",
+                message="trustsync.v1 propose requires registry object",
                 retryable=False,
             )
+        if isinstance(proposal_id_raw, str) and proposal_id_raw.strip():
+            proposal_id = proposal_id_raw.strip()
+        else:
+            proposal_id = sha256_prefixed(canonical_json_bytes({"registry": registry, "merge": merge}))
+
+        if policy_manager.has_applied_proposal(proposal_id):
+            snapshot = policy_manager.snapshot(include_private=False)
+            result_payload = {
+                "op": "propose",
+                "status": "accepted",
+                "message": "registry update already applied",
+                "snapshot": snapshot,
+                "registry_hash": policy_manager.snapshot_hash(include_private=False),
+                "source_agent": source_agent,
+                "proposal_id": proposal_id,
+            }
+            return build_envelope(
+                msg_type="res",
+                from_identity=request["to"],
+                to_identity=request["from"],
+                content_type="trustsync.v1",
+                payload=result_payload,
+                cap=_cap_with_tools(tools),
+                schema=get_builtin_descriptor("trustsync.v1"),
+                trace=derive_response_trace(request.get("trace")),
+            )
+
+        signed_doc = _build_trustsync_proposal_doc(registry=registry, merge=merge, proposal_id=proposal_id)
 
         try:
-            verify_detached_json(registry, signature, update_verify_key)
+            approved_by: list[str] = []
+            if governance_policy is not None:
+                approved_by = _verify_trustsync_quorum(payload=payload, signed_doc=signed_doc, policy=governance_policy)
+            else:
+                signature = payload.get("signature")
+                if not isinstance(signature, str) or not signature:
+                    raise ValueError("trustsync.v1 propose requires signature")
+                verify_key = update_verify_key
+                if verify_key is None:
+                    raise ValueError("trust update verify key is not configured")
+                verify_detached_json(registry, signature, verify_key)
+
             registry_hash = policy_manager.apply_registry(registry, merge=merge)
+            policy_manager.mark_applied_proposal(proposal_id)
             snapshot = policy_manager.snapshot(include_private=False)
             result_payload = {
                 "op": "propose",
@@ -389,13 +447,21 @@ def _make_trustsync_handler(
                 "snapshot": snapshot,
                 "registry_hash": registry_hash,
                 "source_agent": source_agent,
+                "proposal_id": proposal_id,
             }
+            if approved_by:
+                result_payload["approved_by"] = approved_by
+                result_payload["quorum"] = {
+                    "threshold": governance_policy.threshold if governance_policy is not None else 1,
+                    "count": len(approved_by),
+                }
         except (SecurityError, ValueError) as exc:
             result_payload = {
                 "op": "propose",
                 "status": "rejected",
                 "message": f"registry update rejected: {exc}",
                 "source_agent": source_agent,
+                "proposal_id": proposal_id,
             }
         return build_envelope(
             msg_type="res",
@@ -411,7 +477,12 @@ def _make_trustsync_handler(
     return _handle_trustsync
 
 
-def _make_session_handler(*, tools: list[str], signing_key: str | None) -> HandlerFn:
+def _make_session_handler(
+    *,
+    tools: list[str],
+    signing_key: str | None,
+    session_binding_store: SessionBindingStoreProtocol | None,
+) -> HandlerFn:
     def _handle_session(request: dict[str, Any]) -> dict[str, Any]:
         payload_any = request.get("payload")
         payload: dict[str, Any] = payload_any if isinstance(payload_any, dict) else {}
@@ -441,18 +512,60 @@ def _make_session_handler(*, tools: list[str], signing_key: str | None) -> Handl
             exp = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10)).replace(microsecond=0).isoformat()
             exp = exp.replace("+00:00", "Z")
 
-        binding_doc = {
-            "from_agent": request.get("from", {}).get("agent_id")
+        from_agent = (
+            request.get("from", {}).get("agent_id")
             if isinstance(request.get("from"), dict)
-            else "did:key:unknown",
-            "to_agent": request.get("to", {}).get("agent_id")
+            else "did:key:unknown"
+        )
+        to_agent = (
+            request.get("to", {}).get("agent_id")
             if isinstance(request.get("to"), dict)
-            else "did:key:unknown",
-            "profile": profile,
-            "nonce": nonce,
-            "expires": exp,
-        }
-        binding_id = sha256_prefixed(canonical_json_bytes(binding_doc))
+            else "did:key:unknown"
+        )
+        if not isinstance(from_agent, str):
+            from_agent = "did:key:unknown"
+        if not isinstance(to_agent, str):
+            to_agent = "did:key:unknown"
+        try:
+            binding_doc = build_session_binding_doc(
+                from_agent=from_agent,
+                to_agent=to_agent,
+                profile=profile,
+                nonce=nonce,
+                expires=exp,
+            )
+        except ValueError as exc:
+            return make_error_response(
+                request=request,
+                code="BAD_REQUEST",
+                message=str(exc),
+                retryable=False,
+            )
+        binding_id = compute_session_binding_id(
+            from_agent=from_agent,
+            to_agent=to_agent,
+            profile=profile,
+            nonce=nonce,
+            expires=exp,
+        )
+
+        if session_binding_store is not None:
+            try:
+                session_binding_store.register(
+                    binding_id=binding_id,
+                    from_agent=from_agent,
+                    to_agent=to_agent,
+                    expires=exp,
+                    profile=profile,
+                )
+            except ValueError as exc:
+                return make_error_response(
+                    request=request,
+                    code="BAD_REQUEST",
+                    message=f"session binding rejected: {exc}",
+                    retryable=False,
+                )
+
         response_payload: dict[str, Any] = {
             "op": "ack",
             "accepted": True,
@@ -516,7 +629,9 @@ def make_default_handler(
     tool_execution_policy: ToolExecutionPolicy | None = None,
     trust_policy_manager: SecurityPolicyManager | None = None,
     trust_update_verify_key: str | None = None,
+    trust_governance_policy: TrustGovernancePolicy | None = None,
     session_binding_signing_key: str | None = None,
+    session_binding_store: SessionBindingStoreProtocol | None = None,
 ) -> HandlerFn:
     registry = tool_registry or make_default_tool_registry()
     tools = registry.names()
@@ -532,10 +647,12 @@ def make_default_handler(
                 tools=tools,
                 policy_manager=trust_policy_manager,
                 update_verify_key=trust_update_verify_key,
+                governance_policy=trust_governance_policy,
             ),
             "session.v1": _make_session_handler(
                 tools=tools,
                 signing_key=session_binding_signing_key,
+                session_binding_store=session_binding_store,
             ),
         }
     )
@@ -563,3 +680,55 @@ def _extract_authz_scopes(raw: Any) -> set[str]:
         if isinstance(item, str) and item:
             normalized.add(item)
     return normalized
+
+
+def _build_trustsync_proposal_doc(
+    *,
+    registry: dict[str, Any],
+    merge: bool,
+    proposal_id: str,
+) -> dict[str, Any]:
+    return {
+        "op": "propose",
+        "proposal_id": proposal_id,
+        "merge": bool(merge),
+        "registry": registry,
+    }
+
+
+def _verify_trustsync_quorum(
+    *,
+    payload: dict[str, Any],
+    signed_doc: dict[str, Any],
+    policy: TrustGovernancePolicy,
+) -> list[str]:
+    policy.validate()
+    approvals = payload.get("approvals")
+    if not isinstance(approvals, list) or not approvals:
+        raise ValueError("trustsync quorum mode requires approvals[]")
+
+    approved_by: list[str] = []
+    seen: set[str] = set()
+    for item in approvals:
+        if not isinstance(item, dict):
+            raise ValueError("approvals entries must be objects")
+        approver = item.get("approver")
+        signature = item.get("signature")
+        if not isinstance(approver, str) or not approver:
+            raise ValueError("approval approver must be a non-empty string")
+        if not isinstance(signature, str) or not signature:
+            raise ValueError("approval signature must be a non-empty string")
+        if approver in seen:
+            continue
+        verify_key = policy.approver_keys.get(approver)
+        if verify_key is None:
+            raise ValueError(f"approval from unknown approver: {approver}")
+        verify_detached_json(signed_doc, signature, verify_key)
+        seen.add(approver)
+        approved_by.append(approver)
+
+    if len(approved_by) < policy.threshold:
+        raise ValueError(
+            f"quorum not met: approved={len(approved_by)} required={policy.threshold}"
+        )
+    return sorted(approved_by)

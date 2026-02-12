@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from a2a_sdl.handlers import ToolExecutionPolicy, default_handler, make_default_handler
+from a2a_sdl.handlers import TrustGovernancePolicy, ToolExecutionPolicy, default_handler, make_default_handler
 from a2a_sdl.envelope import validate_envelope
 from a2a_sdl.policy import SecurityPolicy, SecurityPolicyManager
 from a2a_sdl.schema import get_builtin_descriptor
 from a2a_sdl.security import generate_signing_keypair, sign_detached_json, verify_detached_json
+from a2a_sdl.session import SessionBindingStore
 
 from tests.test_helpers import make_task_envelope, make_trace
 
@@ -208,6 +209,91 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(res["payload"]["status"], "accepted")
         self.assertIn("kid-new", res["payload"]["snapshot"]["trusted_signing_keys"])
 
+    def test_trustsync_propose_quorum_applies_update(self) -> None:
+        approver_a = generate_signing_keypair()
+        approver_b = generate_signing_keypair()
+        manager = SecurityPolicyManager(SecurityPolicy())
+        governance = TrustGovernancePolicy(
+            approver_keys={
+                "did:key:ops-a": approver_a["public_key_b64"],
+                "did:key:ops-b": approver_b["public_key_b64"],
+            },
+            threshold=2,
+        )
+        handler = make_default_handler(
+            trust_policy_manager=manager,
+            trust_governance_policy=governance,
+        )
+        registry = {"trusted_signing_keys": {"kid-q": "pub-q"}}
+        proposal_id = "proposal-q-1"
+        signed_doc = {
+            "op": "propose",
+            "proposal_id": proposal_id,
+            "merge": True,
+            "registry": registry,
+        }
+        approvals = [
+            {"approver": "did:key:ops-a", "signature": sign_detached_json(signed_doc, approver_a["private_key_b64"])},
+            {"approver": "did:key:ops-b", "signature": sign_detached_json(signed_doc, approver_b["private_key_b64"])},
+        ]
+
+        req = make_task_envelope()
+        req["ct"] = "trustsync.v1"
+        req["schema"] = get_builtin_descriptor("trustsync.v1")
+        req["payload"] = {
+            "op": "propose",
+            "proposal_id": proposal_id,
+            "registry": registry,
+            "merge": True,
+            "approvals": approvals,
+        }
+        res = handler(req)
+        self.assertEqual(res["ct"], "trustsync.v1")
+        self.assertEqual(res["payload"]["status"], "accepted")
+        self.assertEqual(res["payload"]["proposal_id"], proposal_id)
+        self.assertEqual(res["payload"]["quorum"]["count"], 2)
+        self.assertIn("did:key:ops-a", res["payload"]["approved_by"])
+        self.assertIn("kid-q", res["payload"]["snapshot"]["trusted_signing_keys"])
+
+    def test_trustsync_propose_quorum_rejects_insufficient_approvals(self) -> None:
+        approver_a = generate_signing_keypair()
+        manager = SecurityPolicyManager(SecurityPolicy())
+        handler = make_default_handler(
+            trust_policy_manager=manager,
+            trust_governance_policy=TrustGovernancePolicy(
+                approver_keys={
+                    "did:key:ops-a": approver_a["public_key_b64"],
+                    "did:key:ops-b": approver_a["public_key_b64"],
+                },
+                threshold=2,
+            ),
+        )
+        registry = {"trusted_signing_keys": {"kid-q2": "pub-q2"}}
+        proposal_id = "proposal-q-2"
+        signed_doc = {
+            "op": "propose",
+            "proposal_id": proposal_id,
+            "merge": True,
+            "registry": registry,
+        }
+        approvals = [
+            {"approver": "did:key:ops-a", "signature": sign_detached_json(signed_doc, approver_a["private_key_b64"])},
+        ]
+        req = make_task_envelope()
+        req["ct"] = "trustsync.v1"
+        req["schema"] = get_builtin_descriptor("trustsync.v1")
+        req["payload"] = {
+            "op": "propose",
+            "proposal_id": proposal_id,
+            "registry": registry,
+            "merge": True,
+            "approvals": approvals,
+        }
+        res = handler(req)
+        self.assertEqual(res["ct"], "trustsync.v1")
+        self.assertEqual(res["payload"]["status"], "rejected")
+        self.assertIn("quorum not met", res["payload"]["message"])
+
     def test_session_open_returns_signed_binding(self) -> None:
         keys = generate_signing_keypair()
         handler = make_default_handler(session_binding_signing_key=keys["private_key_b64"])
@@ -237,6 +323,30 @@ class HandlerTests(unittest.TestCase):
                 binding_doc,
                 res["payload"]["binding_sig"],
                 keys["public_key_b64"],
+            )
+        )
+
+    def test_session_open_registers_binding_in_store(self) -> None:
+        store = SessionBindingStore()
+        handler = make_default_handler(session_binding_store=store)
+
+        req = make_task_envelope()
+        req["ct"] = "session.v1"
+        req["schema"] = get_builtin_descriptor("session.v1")
+        req["payload"] = {
+            "op": "open",
+            "profile": {"ct": ["task.v1"], "mode": "enc+sig"},
+            "nonce": "nonce-5678",
+        }
+        res = handler(req)
+        self.assertEqual(res["ct"], "session.v1")
+        binding_id = res["payload"]["binding_id"]
+
+        self.assertTrue(
+            store.is_active(
+                binding_id=binding_id,
+                from_agent=req["from"]["agent_id"],
+                to_agent=req["to"]["agent_id"],
             )
         )
 
