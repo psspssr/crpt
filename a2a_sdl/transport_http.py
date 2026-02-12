@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 import socket
+import ssl
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -27,12 +29,45 @@ from .envelope import (
     validate_envelope,
 )
 from .policy import SecurityPolicy, enforce_request_security
-from .replay import ReplayCache
+from .replay import ReplayCache, ReplayCacheProtocol
 from .schema import get_builtin_descriptor
 from .utils import new_message_id
 
 
 MessageHandler = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+class AdmissionController:
+    """Simple token-bucket + concurrency gate for inbound requests."""
+
+    def __init__(self, *, max_concurrent: int, rate_limit_rps: float, burst: int) -> None:
+        self.max_concurrent = max(1, int(max_concurrent))
+        self.rate_limit_rps = max(0.0, float(rate_limit_rps))
+        self.burst = max(1, int(burst))
+        self._semaphore = threading.BoundedSemaphore(self.max_concurrent)
+        self._lock = threading.Lock()
+        self._tokens = float(self.burst)
+        self._last_refill = time.monotonic()
+
+    def acquire(self) -> tuple[bool, str | None]:
+        if not self._semaphore.acquire(blocking=False):
+            return False, "concurrency_limit"
+
+        with self._lock:
+            now = time.monotonic()
+            elapsed = max(0.0, now - self._last_refill)
+            self._last_refill = now
+            self._tokens = min(self.burst, self._tokens + (elapsed * self.rate_limit_rps))
+
+            if self._tokens < 1.0:
+                self._semaphore.release()
+                return False, "rate_limit"
+
+            self._tokens -= 1.0
+        return True, None
+
+    def release(self) -> None:
+        self._semaphore.release()
 
 
 class A2AHTTPServer:
@@ -44,10 +79,15 @@ class A2AHTTPServer:
         port: int,
         handler: MessageHandler,
         *,
-        replay_cache: ReplayCache | None = None,
+        replay_cache: ReplayCacheProtocol | None = None,
         enforce_replay: bool = False,
         security_policy: SecurityPolicy | None = None,
         audit_chain: AuditChain | None = None,
+        tls_certfile: str | None = None,
+        tls_keyfile: str | None = None,
+        tls_ca_file: str | None = None,
+        tls_require_client_cert: bool = False,
+        admission_controller: AdmissionController | None = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -55,10 +95,40 @@ class A2AHTTPServer:
         self.enforce_replay = enforce_replay
         self.security_policy = security_policy
         self.audit_chain = audit_chain
+        self.tls_certfile = tls_certfile
+        self.tls_keyfile = tls_keyfile
+        self.tls_ca_file = tls_ca_file
+        self.tls_require_client_cert = tls_require_client_cert
+        self.admission_controller = admission_controller
 
         needs_replay = enforce_replay or bool(security_policy and security_policy.require_replay)
         self.replay_cache = replay_cache or (ReplayCache() if needs_replay else None)
+        self._validate_tls_config()
         self._server = self._build_server()
+        self._wrap_server_socket_with_tls()
+
+    def _validate_tls_config(self) -> None:
+        has_cert = bool(self.tls_certfile)
+        has_key = bool(self.tls_keyfile)
+        if has_cert != has_key:
+            raise ValueError("tls_certfile and tls_keyfile must be provided together")
+        if self.tls_require_client_cert and not has_cert:
+            raise ValueError("tls_require_client_cert requires tls_certfile/tls_keyfile")
+
+    def _wrap_server_socket_with_tls(self) -> None:
+        if not self.tls_certfile or not self.tls_keyfile:
+            return
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(certfile=self.tls_certfile, keyfile=self.tls_keyfile)
+        if self.tls_ca_file:
+            context.load_verify_locations(cafile=self.tls_ca_file)
+        if self.tls_require_client_cert:
+            context.verify_mode = ssl.CERT_REQUIRED
+        else:
+            context.verify_mode = ssl.CERT_NONE
+        self._server.socket = context.wrap_socket(self._server.socket, server_side=True)
 
     def _build_server(self) -> ThreadingHTTPServer:
         handler_fn = self.handler
@@ -66,6 +136,7 @@ class A2AHTTPServer:
         replay_cache = self.replay_cache
         security_policy = self.security_policy
         audit_chain = self.audit_chain
+        admission_controller = self.admission_controller
 
         class RequestHandler(BaseHTTPRequestHandler):
             _READ_TIMEOUT_S = 15.0
@@ -79,7 +150,7 @@ class A2AHTTPServer:
                 encoding = detect_encoding_from_content_type(content_type)
                 accept = self.headers.get("Accept", "")
 
-                def _send_protocol_response(response_envelope: dict[str, Any]) -> None:
+                def _send_protocol_response(response_envelope: dict[str, Any], *, status_code: int = 200) -> None:
                     response_encoding = "cbor" if "application/cbor" in accept else encoding
                     try:
                         response_bytes = encode_bytes(response_envelope, encoding=response_encoding)
@@ -89,7 +160,7 @@ class A2AHTTPServer:
                         response_ct = "application/json"
 
                     try:
-                        self.send_response(200)
+                        self.send_response(status_code)
                         self.send_header("Content-Type", response_ct)
                         self.send_header("Content-Length", str(len(response_bytes)))
                         self.end_headers()
@@ -97,78 +168,97 @@ class A2AHTTPServer:
                     except (BrokenPipeError, ConnectionResetError):
                         return
 
-                length_header = self.headers.get("Content-Length", "0")
-                try:
-                    length = int(length_header)
-                except ValueError:
-                    response_envelope = make_error_response(
-                        request=_fallback_request_envelope(),
-                        code="BAD_REQUEST",
-                        message="invalid Content-Length",
-                    )
-                    _send_protocol_response(response_envelope)
-                    return
-
-                if length < 0:
-                    response_envelope = make_error_response(
-                        request=_fallback_request_envelope(),
-                        code="BAD_REQUEST",
-                        message="negative Content-Length",
-                    )
-                    _send_protocol_response(response_envelope)
-                    return
-
-                max_bytes = int(DEFAULT_LIMITS["max_bytes"])
-                if length > max_bytes:
-                    response_envelope = make_error_response(
-                        request=_fallback_request_envelope(),
-                        code="BAD_REQUEST",
-                        message=f"content-length exceeds max_bytes ({max_bytes})",
-                        details={"max_bytes": max_bytes},
-                    )
-                    _send_protocol_response(response_envelope)
-                    return
-
-                try:
-                    self.connection.settimeout(self._READ_TIMEOUT_S)
-                    body = self.rfile.read(length)
-                except (TimeoutError, socket.timeout):
-                    response_envelope = make_error_response(
-                        request=_fallback_request_envelope(),
-                        code="BAD_REQUEST",
-                        message="request read timeout",
-                    )
-                    _send_protocol_response(response_envelope)
-                    return
-
-                request_envelope: dict[str, Any] | None = None
-                try:
-                    request_envelope = decode_bytes(body, encoding=encoding)
-                except CodecError as exc:
-                    response_envelope = make_error_response(
-                        request=_fallback_request_envelope(),
-                        code="UNSUPPORTED_ENCODING",
-                        message=str(exc),
-                    )
-                else:
-                    response_envelope = self._process_request(request_envelope)
-
-                if audit_chain is not None:
-                    response_envelope = _attach_audit_receipt(
-                        request_envelope=request_envelope,
-                        response_envelope=response_envelope,
-                        audit_chain=audit_chain,
-                    )
-                    try:
-                        validate_envelope(response_envelope)
-                    except Exception as exc:
+                admission_acquired = False
+                if admission_controller is not None:
+                    allowed, reason = admission_controller.acquire()
+                    if not allowed:
                         response_envelope = make_error_response(
-                            request=request_envelope or _fallback_request_envelope(),
-                            code="INTERNAL",
-                            message=f"audit response invalid: {exc}",
+                            request=_fallback_request_envelope(),
+                            code="BAD_REQUEST",
+                            message="request rejected by admission controller",
+                            details={"reason": reason},
+                            retryable=True,
                         )
+                        _send_protocol_response(response_envelope, status_code=429)
+                        return
+                    admission_acquired = True
 
-                _send_protocol_response(response_envelope)
+                try:
+                    length_header = self.headers.get("Content-Length", "0")
+                    try:
+                        length = int(length_header)
+                    except ValueError:
+                        response_envelope = make_error_response(
+                            request=_fallback_request_envelope(),
+                            code="BAD_REQUEST",
+                            message="invalid Content-Length",
+                        )
+                        _send_protocol_response(response_envelope)
+                        return
+
+                    if length < 0:
+                        response_envelope = make_error_response(
+                            request=_fallback_request_envelope(),
+                            code="BAD_REQUEST",
+                            message="negative Content-Length",
+                        )
+                        _send_protocol_response(response_envelope)
+                        return
+
+                    max_bytes = int(DEFAULT_LIMITS["max_bytes"])
+                    if length > max_bytes:
+                        response_envelope = make_error_response(
+                            request=_fallback_request_envelope(),
+                            code="BAD_REQUEST",
+                            message=f"content-length exceeds max_bytes ({max_bytes})",
+                            details={"max_bytes": max_bytes},
+                        )
+                        _send_protocol_response(response_envelope)
+                        return
+
+                    try:
+                        self.connection.settimeout(self._READ_TIMEOUT_S)
+                        body = self.rfile.read(length)
+                    except (TimeoutError, socket.timeout):
+                        response_envelope = make_error_response(
+                            request=_fallback_request_envelope(),
+                            code="BAD_REQUEST",
+                            message="request read timeout",
+                        )
+                        _send_protocol_response(response_envelope)
+                        return
+
+                    request_envelope: dict[str, Any] | None = None
+                    try:
+                        request_envelope = decode_bytes(body, encoding=encoding)
+                    except CodecError as exc:
+                        response_envelope = make_error_response(
+                            request=_fallback_request_envelope(),
+                            code="UNSUPPORTED_ENCODING",
+                            message=str(exc),
+                        )
+                    else:
+                        response_envelope = self._process_request(request_envelope)
+
+                    if audit_chain is not None:
+                        response_envelope = _attach_audit_receipt(
+                            request_envelope=request_envelope,
+                            response_envelope=response_envelope,
+                            audit_chain=audit_chain,
+                        )
+                        try:
+                            validate_envelope(response_envelope)
+                        except Exception as exc:
+                            response_envelope = make_error_response(
+                                request=request_envelope or _fallback_request_envelope(),
+                                code="INTERNAL",
+                                message=f"audit response invalid: {exc}",
+                            )
+
+                    _send_protocol_response(response_envelope)
+                finally:
+                    if admission_acquired and admission_controller is not None:
+                        admission_controller.release()
 
             def _process_request(self, request_envelope: dict[str, Any]) -> dict[str, Any]:
                 try:
@@ -490,7 +580,7 @@ def _validation_error_response(request_envelope: dict[str, Any], exc: EnvelopeVa
 
 
 
-def _enforce_replay(request_envelope: dict[str, Any], replay_cache: ReplayCache) -> None:
+def _enforce_replay(request_envelope: dict[str, Any], replay_cache: ReplayCacheProtocol) -> None:
     sec = request_envelope.get("sec")
     if not isinstance(sec, dict):
         return

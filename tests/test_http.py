@@ -17,7 +17,13 @@ from a2a_sdl.policy import SecurityPolicy
 from a2a_sdl.replay import ReplayCache
 from a2a_sdl.schema import get_builtin_descriptor
 from a2a_sdl.security import encrypt_payload, generate_signing_keypair, generate_x25519_keypair, sign_envelope
-from a2a_sdl.transport_http import A2AHTTPServer, _pick_downgrade_ct, send_http, send_http_with_auto_downgrade
+from a2a_sdl.transport_http import (
+    AdmissionController,
+    A2AHTTPServer,
+    _pick_downgrade_ct,
+    send_http,
+    send_http_with_auto_downgrade,
+)
 
 from tests.test_helpers import make_task_envelope
 
@@ -330,6 +336,32 @@ class HTTPTests(unittest.TestCase):
         }
         with self.assertRaises(EnvelopeValidationError):
             send_http("http://127.0.0.1:9/a2a", req, encoding="json")
+
+    def test_admission_controller_rate_limits_requests(self) -> None:
+        from a2a_sdl.handlers import default_handler
+
+        limiter = AdmissionController(max_concurrent=8, rate_limit_rps=0.0, burst=1)
+        server = A2AHTTPServer("127.0.0.1", 0, handler=default_handler, admission_controller=limiter)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        time.sleep(0.05)
+
+        try:
+            port = server._server.server_address[1]
+            url = f"http://127.0.0.1:{port}/a2a"
+
+            first = send_http(url, make_task_envelope(), encoding="json", timeout=10.0)
+            self.assertEqual(first["ct"], "state.v1")
+
+            second_req = make_task_envelope()
+            second_req["id"] = "rate-limit-2"
+            second = send_http(url, second_req, encoding="json", timeout=10.0)
+            self.assertEqual(second["ct"], "error.v1")
+            self.assertEqual(second["payload"]["code"], "BAD_REQUEST")
+            self.assertEqual(second["payload"]["details"]["reason"], "rate_limit")
+        finally:
+            server.shutdown()
+            thread.join(timeout=1)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,12 @@ class EnvelopeTests(unittest.TestCase):
         with self.assertRaises(EnvelopeValidationError):
             validate_envelope(env, limits={"max_hops": 8})
 
+    def test_capability_version_mismatch_rejected(self) -> None:
+        env = make_task_envelope()
+        env["cap"]["a2a_sdl"]["v"] = 999
+        with self.assertRaises(EnvelopeValidationError):
+            validate_envelope(env)
+
     def test_make_error_response_derives_child_trace(self) -> None:
         req = make_task_envelope()
         req["trace"] = make_trace(hops=2)

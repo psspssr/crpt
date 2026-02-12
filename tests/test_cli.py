@@ -194,6 +194,58 @@ class CLITests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("--secure-required needs", stderr.getvalue())
 
+    def test_serve_prod_requires_tls_by_default(self) -> None:
+        with tempfile.NamedTemporaryFile("w+", suffix=".json") as trusted, tempfile.NamedTemporaryFile(
+            "w+", suffix=".json"
+        ) as decrypt:
+            trusted.write('{"kid-1":"pub"}')
+            trusted.flush()
+            decrypt.write('{"enc-1":"priv"}')
+            decrypt.flush()
+            with redirect_stdout(io.StringIO()):
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    code = main(
+                        [
+                            "serve",
+                            "--deployment-mode",
+                            "prod",
+                            "--trusted-signing-keys-file",
+                            trusted.name,
+                            "--decrypt-keys-file",
+                            decrypt.name,
+                        ]
+                    )
+        self.assertEqual(code, 2)
+        self.assertIn("requires TLS", stderr.getvalue())
+
+    def test_serve_prod_requires_durable_replay_storage(self) -> None:
+        with tempfile.NamedTemporaryFile("w+", suffix=".json") as trusted, tempfile.NamedTemporaryFile(
+            "w+", suffix=".json"
+        ) as decrypt:
+            trusted.write('{"kid-1":"pub"}')
+            trusted.flush()
+            decrypt.write('{"enc-1":"priv"}')
+            decrypt.flush()
+            with redirect_stdout(io.StringIO()):
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    code = main(
+                        [
+                            "serve",
+                            "--deployment-mode",
+                            "prod",
+                            "--trusted-signing-keys-file",
+                            trusted.name,
+                            "--decrypt-keys-file",
+                            decrypt.name,
+                            "--tls-cert-file",
+                            "cert.pem",
+                            "--tls-key-file",
+                            "key.pem",
+                        ]
+                    )
+        self.assertEqual(code, 2)
+        self.assertIn("requires durable replay storage", stderr.getvalue())
+
     def test_swarm_requires_three_ports(self) -> None:
         with redirect_stdout(io.StringIO()):
             with patch("sys.stderr", new_callable=io.StringIO) as stderr:

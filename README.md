@@ -29,6 +29,10 @@ This repository implements:
 - Key lifecycle policy support: key rotation sets, revoked key IDs, and per-kid expiry checks
 - Plugin safety controls: deny-by-default tool execution and strict custom handler module/manifest validation
 - Stress and fuzz testing for malformed envelopes and concurrent HTTP load
+- Durable replay protection via optional SQLite-backed nonce cache (`--replay-db-file`)
+- Production transport controls: TLS/mTLS options and production deployment profile
+- Admission control with concurrency + token-bucket rate limiting
+- Audit signature verification support for signed audit chains
 
 ## How It Works
 
@@ -118,7 +122,7 @@ a2a keygen --out-dir .keys
 Send a task over HTTP:
 
 ```bash
-a2a serve --host 127.0.0.1 --port 8080
+a2a serve --host 127.0.0.1 --port 8080 --deployment-mode dev --allow-insecure-http
 # in another shell:
 a2a send --url http://127.0.0.1:8080/a2a --ct task.v1 --payload-file a2a_sdl/examples/task_min_payload.json --timeout 30 --retry-attempts 2 --retry-backoff-s 0.25 --auto-negotiate
 ```
@@ -132,7 +136,11 @@ Secure server mode (mandatory encrypted/signed inbound requests + audit log):
 
 a2a serve \
   --host 127.0.0.1 --port 8080 \
+  --deployment-mode prod \
   --secure-required \
+  --tls-cert-file /etc/a2a/tls/server.crt \
+  --tls-key-file /etc/a2a/tls/server.key \
+  --replay-db-file /var/lib/a2a/replay.db \
   --trusted-signing-keys-file trusted_signing_keys.json \
   --decrypt-keys-file decrypt_keys.json \
   --agent-kid-map-file agent_kid_map.json \
@@ -148,6 +156,10 @@ Key lifecycle controls (rotation + revocation):
 # revoked_kids, kid_not_after, decrypt_private_keys
 a2a serve \
   --host 127.0.0.1 --port 8080 \
+  --deployment-mode prod \
+  --tls-cert-file /etc/a2a/tls/server.crt \
+  --tls-key-file /etc/a2a/tls/server.key \
+  --replay-db-file /var/lib/a2a/replay.db \
   --key-registry-file key_registry.json
 ```
 

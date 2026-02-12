@@ -22,6 +22,7 @@ from .schema import (
     validate_schema_descriptor,
 )
 from .utils import canonical_json_bytes, ensure_iso_utc, new_message_id, now_iso_utc, sha256_prefixed
+from .versioning import enforce_capability_version_compatibility
 
 
 class EnvelopeValidationError(ValueError):
@@ -127,6 +128,10 @@ def validate_envelope(
 
     if not isinstance(envelope["cap"], dict):
         raise EnvelopeValidationError("cap must be an object")
+    try:
+        enforce_capability_version_compatibility(envelope["cap"], local_version=PROTOCOL_VERSION)
+    except ValueError as exc:
+        raise EnvelopeValidationError(str(exc)) from exc
 
     ct = envelope["ct"]
     if not isinstance(ct, str):

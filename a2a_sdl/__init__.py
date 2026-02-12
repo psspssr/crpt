@@ -21,7 +21,12 @@ from .security import (
     sign_envelope,
     verify_envelope_signature,
 )
-from .versioning import is_protocol_version_compatible, parse_content_type_version, versioning_payload_metadata
+from .versioning import (
+    enforce_capability_version_compatibility,
+    is_protocol_version_compatible,
+    parse_content_type_version,
+    versioning_payload_metadata,
+)
 
 __all__ = [
     "EnvelopeValidationError",
@@ -47,6 +52,7 @@ __all__ = [
     "verify_envelope_signature",
     "parse_content_type_version",
     "is_protocol_version_compatible",
+    "enforce_capability_version_compatibility",
     "versioning_payload_metadata",
 ]
 

@@ -4,6 +4,7 @@ import unittest
 
 from a2a_sdl.constants import PROTOCOL_VERSION
 from a2a_sdl.versioning import (
+    enforce_capability_version_compatibility,
     is_protocol_version_compatible,
     parse_content_type_version,
     versioning_payload_metadata,
@@ -26,6 +27,12 @@ class VersioningTests(unittest.TestCase):
         self.assertIn("semver_policy", payload)
         self.assertIn("migration", payload)
         self.assertEqual(payload["protocol"]["current"], PROTOCOL_VERSION)
+
+    def test_enforce_capability_version_compatibility(self) -> None:
+        cap = {"a2a_sdl": {"v": PROTOCOL_VERSION}}
+        enforce_capability_version_compatibility(cap)
+        with self.assertRaises(ValueError):
+            enforce_capability_version_compatibility({"a2a_sdl": {"v": PROTOCOL_VERSION + 1}})
 
 
 if __name__ == "__main__":

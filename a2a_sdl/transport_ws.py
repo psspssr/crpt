@@ -8,16 +8,15 @@ from typing import Any, Callable
 from .codec import CodecError, decode_bytes, encode_bytes
 from .envelope import EnvelopeValidationError, make_error_response, validate_envelope
 from .policy import SecurityPolicy, enforce_request_security
-from .replay import ReplayCache
+from .replay import ReplayCache, ReplayCacheProtocol
 from .transport_http import _enforce_replay, _fallback_request_envelope, _validation_error_response
 
-_websockets: Any
 try:
-    import websockets as _websockets
+    import websockets as _websockets_module
 except Exception:  # pragma: no cover - optional dependency
-    _websockets = None
+    _websockets_module = None
 
-websockets: Any = _websockets
+websockets: Any = _websockets_module
 
 
 MessageHandler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -74,7 +73,7 @@ async def ws_serve(
     port: int = 8765,
     *,
     encoding: str = "json",
-    replay_cache: ReplayCache | None = None,
+    replay_cache: ReplayCacheProtocol | None = None,
     enforce_replay: bool = False,
     security_policy: SecurityPolicy | None = None,
 ):
@@ -106,7 +105,7 @@ def process_ws_payload(
     encoding: str,
     handler: MessageHandler,
     enforce_replay: bool = False,
-    replay_cache: ReplayCache | None = None,
+    replay_cache: ReplayCacheProtocol | None = None,
     security_policy: SecurityPolicy | None = None,
 ) -> bytes:
     """Process one websocket frame into one websocket frame."""

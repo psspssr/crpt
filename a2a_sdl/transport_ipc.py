@@ -10,7 +10,7 @@ from typing import Any, Callable
 from .codec import decode_bytes, encode_bytes
 from .envelope import validate_envelope
 from .policy import SecurityPolicy
-from .replay import ReplayCache
+from .replay import ReplayCache, ReplayCacheProtocol
 from .transport_ws import process_ws_payload
 
 
@@ -84,7 +84,7 @@ class IPCServer:
         handler: MessageHandler,
         *,
         encoding: str = "json",
-        replay_cache: ReplayCache | None = None,
+        replay_cache: ReplayCacheProtocol | None = None,
         enforce_replay: bool = False,
         security_policy: SecurityPolicy | None = None,
     ) -> None:

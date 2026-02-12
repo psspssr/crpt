@@ -11,6 +11,7 @@
 
 - Current protocol version is `v=1`.
 - Peers must match the same protocol major version.
+- Runtime validation enforces `cap.a2a_sdl.v` compatibility when capability metadata is present.
 - New content types should use `name.vN` naming.
 - A new content-type major (`task.v2`) requires explicit migration notes before rollout.
 

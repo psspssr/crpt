@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .envelope import EnvelopeValidationError
-from .replay import ReplayCache
+from .replay import ReplayCacheProtocol
 from .schema import SchemaValidationError, validate_payload
 from .security import SecurityError, decrypt_payload, verify_envelope_signature
 
@@ -31,7 +31,7 @@ class SecurityPolicy:
 def enforce_request_security(
     envelope: dict[str, Any],
     policy: SecurityPolicy,
-    replay_cache: ReplayCache | None,
+    replay_cache: ReplayCacheProtocol | None,
 ) -> None:
     sec = envelope.get("sec")
     if not isinstance(sec, dict):
@@ -94,7 +94,7 @@ def enforce_request_security(
 
 
 
-def _enforce_replay(envelope: dict[str, Any], replay_cache: ReplayCache | None) -> None:
+def _enforce_replay(envelope: dict[str, Any], replay_cache: ReplayCacheProtocol | None) -> None:
     if replay_cache is None:
         raise EnvelopeValidationError("security policy requires replay cache")
 

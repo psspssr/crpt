@@ -22,9 +22,9 @@ from .security import (
     generate_x25519_keypair,
     sign_envelope,
 )
-from .replay import ReplayCache
+from .replay import ReplayCache, SQLiteReplayCache
 from .swarm import BuddyEndpoint, CodexBackend, CodexBuddyServer, SwarmCoordinator
-from .transport_http import A2AHTTPServer, send_http, send_http_with_auto_downgrade
+from .transport_http import AdmissionController, A2AHTTPServer, send_http, send_http_with_auto_downgrade
 from .utils import json_dumps_pretty, new_message_id, sha256_prefixed
 
 
@@ -44,9 +44,46 @@ def main(argv: list[str] | None = None) -> int:
     serve = subparsers.add_parser("serve", help="Run local HTTP A2A server")
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8080)
+    serve.add_argument(
+        "--deployment-mode",
+        choices=["prod", "dev"],
+        default="prod",
+        help="Deployment profile. prod enforces secure mode + TLS unless --allow-insecure-http is set.",
+    )
+    serve.add_argument(
+        "--allow-insecure-http",
+        action="store_true",
+        help="Allow plaintext HTTP without TLS (recommended only for local development).",
+    )
+    serve.add_argument("--tls-cert-file", help="TLS server certificate chain file (PEM)")
+    serve.add_argument("--tls-key-file", help="TLS server private key file (PEM)")
+    serve.add_argument("--tls-ca-file", help="TLS CA bundle for optional/required client cert validation")
+    serve.add_argument("--tls-require-client-cert", action="store_true", help="Require mutual TLS client certs")
     serve.add_argument("--replay-protection", action="store_true", help="Enable sec.replay nonce cache checks")
     serve.add_argument("--replay-ttl", type=int, default=600, help="Replay nonce TTL in seconds")
     serve.add_argument("--replay-max-entries", type=int, default=10000, help="Replay cache max entries")
+    serve.add_argument(
+        "--replay-db-file",
+        help="SQLite file for durable replay nonce storage (recommended in production).",
+    )
+    serve.add_argument(
+        "--admission-max-concurrent",
+        type=int,
+        default=128,
+        help="Maximum in-flight requests accepted concurrently.",
+    )
+    serve.add_argument(
+        "--admission-rate-rps",
+        type=float,
+        default=256.0,
+        help="Token refill rate (requests/second) for admission control.",
+    )
+    serve.add_argument(
+        "--admission-burst",
+        type=int,
+        default=512,
+        help="Admission burst size before throttling.",
+    )
     serve.add_argument("--secure-required", action="store_true", help="Require enc+sig+replay and authz policy")
     serve.add_argument(
         "--allowed-agent",
@@ -205,9 +242,12 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
-    replay_cache = None
+    prod_mode = args.deployment_mode == "prod"
+    effective_secure_required = bool(args.secure_required or prod_mode)
+
+    replay_cache: ReplayCache | SQLiteReplayCache | None = None
     secure_policy_enabled = bool(
-        args.secure_required
+        effective_secure_required
         or args.trusted_signing_keys_file
         or args.agent_kid_map_file
         or args.agent_kids_map_file
@@ -218,8 +258,16 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         or args.allowed_agent
     )
 
-    if args.replay_protection or secure_policy_enabled:
-        replay_cache = ReplayCache(max_entries=args.replay_max_entries, ttl_seconds=args.replay_ttl)
+    effective_replay_protection = bool(args.replay_protection or secure_policy_enabled or prod_mode)
+    if effective_replay_protection:
+        if args.replay_db_file:
+            replay_cache = SQLiteReplayCache(
+                args.replay_db_file,
+                max_entries=args.replay_max_entries,
+                ttl_seconds=args.replay_ttl,
+            )
+        else:
+            replay_cache = ReplayCache(max_entries=args.replay_max_entries, ttl_seconds=args.replay_ttl)
 
     security_policy = None
     if secure_policy_enabled:
@@ -258,7 +306,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             print(f"failed to load secure policy files: {exc}", file=sys.stderr)
             return 2
 
-        if args.secure_required and (not trusted_signing_keys or not decrypt_private_keys):
+        if effective_secure_required and (not trusted_signing_keys or not decrypt_private_keys):
             print(
                 "--secure-required needs --trusted-signing-keys-file and --decrypt-keys-file",
                 file=sys.stderr,
@@ -266,8 +314,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             return 2
 
         security_policy = SecurityPolicy(
-            require_mode="enc+sig" if args.secure_required else None,
-            require_replay=args.secure_required,
+            require_mode="enc+sig" if effective_secure_required else None,
+            require_replay=effective_secure_required,
             allowed_agents=set(args.allowed_agent),
             trusted_signing_keys=trusted_signing_keys,
             required_kid_by_agent=required_kid_by_agent,
@@ -276,6 +324,18 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             kid_not_after=kid_not_after,
             decrypt_private_keys=decrypt_private_keys,
         )
+
+    if prod_mode and not args.allow_insecure_http:
+        if not args.tls_cert_file or not args.tls_key_file:
+            print(
+                "prod deployment requires TLS; provide --tls-cert-file and --tls-key-file "
+                "or use --allow-insecure-http for local-only testing",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.replay_db_file:
+            print("prod deployment requires durable replay storage: --replay-db-file", file=sys.stderr)
+            return 2
 
     audit_chain = None
     if args.audit_log_file:
@@ -306,23 +366,36 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         max_args_bytes=max(1, int(args.max_tool_args_bytes)),
     )
     handler = make_default_handler(extra_handlers=extra_handlers, tool_execution_policy=tool_policy)
+    admission_controller = AdmissionController(
+        max_concurrent=max(1, int(args.admission_max_concurrent)),
+        rate_limit_rps=max(0.0, float(args.admission_rate_rps)),
+        burst=max(1, int(args.admission_burst)),
+    )
 
     server = A2AHTTPServer(
         args.host,
         args.port,
         handler=handler,
         replay_cache=replay_cache,
-        enforce_replay=args.replay_protection,
+        enforce_replay=effective_replay_protection,
         security_policy=security_policy,
         audit_chain=audit_chain,
+        tls_certfile=args.tls_cert_file,
+        tls_keyfile=args.tls_key_file,
+        tls_ca_file=args.tls_ca_file,
+        tls_require_client_cert=args.tls_require_client_cert,
+        admission_controller=admission_controller,
     )
-    print(f"serving on http://{args.host}:{args.port}/a2a")
+    scheme = "https" if args.tls_cert_file and args.tls_key_file else "http"
+    print(f"serving on {scheme}://{args.host}:{args.port}/a2a")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.shutdown()
+        if isinstance(replay_cache, SQLiteReplayCache):
+            replay_cache.close()
     return 0
 
 

@@ -63,3 +63,27 @@ def versioning_payload_metadata() -> dict[str, Any]:
             "rollback_supported": DEFAULT_COMPAT_RULE.rollback_supported,
         },
     }
+
+
+def enforce_capability_version_compatibility(
+    cap: Any,
+    *,
+    local_version: int = PROTOCOL_VERSION,
+) -> None:
+    """Validate peer capability version metadata when present."""
+    if not isinstance(cap, dict):
+        return
+
+    a2a = cap.get("a2a_sdl")
+    if not isinstance(a2a, dict):
+        return
+
+    peer_version = a2a.get("v")
+    if peer_version is None:
+        return
+    if not isinstance(peer_version, int):
+        raise ValueError("cap.a2a_sdl.v must be an integer")
+    if not is_protocol_version_compatible(peer_version, local_version=local_version):
+        raise ValueError(
+            f"incompatible capability protocol version: peer={peer_version} local={local_version}"
+        )
