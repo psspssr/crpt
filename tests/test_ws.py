@@ -10,6 +10,7 @@ from a2a_sdl.policy import SecurityPolicy
 from a2a_sdl.replay import ReplayCache
 from a2a_sdl.security import encrypt_payload, generate_signing_keypair, generate_x25519_keypair, sign_envelope
 from a2a_sdl.transport_ws import process_ws_payload
+from a2a_sdl.versioning import parse_runtime_version_policy
 
 from tests.test_helpers import make_task_envelope
 
@@ -144,6 +145,21 @@ class WSTransportTests(unittest.TestCase):
         decoded = decode_bytes(out, encoding="json")
         self.assertEqual(decoded["ct"], "error.v1")
         self.assertEqual(decoded["payload"]["code"], "SECURITY_UNSUPPORTED")
+
+    def test_process_ws_payload_respects_runtime_version_policy(self) -> None:
+        req = make_task_envelope()
+        version_policy = parse_runtime_version_policy(
+            {"deprecated_content_types": {"task.v1": "2000-01-01T00:00:00Z"}}
+        )
+        out = process_ws_payload(
+            encode_bytes(req, encoding="json"),
+            encoding="json",
+            handler=default_handler,
+            version_policy=version_policy,
+        )
+        decoded = decode_bytes(out, encoding="json")
+        self.assertEqual(decoded["ct"], "error.v1")
+        self.assertIn("deprecated", decoded["payload"]["message"])
 
 
 if __name__ == "__main__":

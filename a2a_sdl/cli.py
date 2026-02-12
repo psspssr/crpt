@@ -10,11 +10,11 @@ import pathlib
 import sys
 from typing import Any
 
-from .audit import AuditChain
+from .audit import AuditChain, HTTPAuditAnchor
 from .codec import decode_bytes
 from .envelope import build_envelope, validate_envelope
 from .handlers import HandlerFn, ToolExecutionPolicy, make_default_handler
-from .policy import SecurityPolicy
+from .policy import SecurityPolicy, SecurityPolicyManager
 from .schema import get_builtin_descriptor
 from .security import (
     encrypt_payload,
@@ -22,10 +22,11 @@ from .security import (
     generate_x25519_keypair,
     sign_envelope,
 )
-from .replay import ReplayCache, SQLiteReplayCache
+from .replay import RedisReplayCache, ReplayCache, SQLiteReplayCache
 from .swarm import BuddyEndpoint, CodexBackend, CodexBuddyServer, SwarmCoordinator
 from .transport_http import AdmissionController, A2AHTTPServer, send_http, send_http_with_auto_downgrade
 from .utils import json_dumps_pretty, new_message_id, sha256_prefixed
+from .versioning import parse_runtime_version_policy
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -65,6 +66,15 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument(
         "--replay-db-file",
         help="SQLite file for durable replay nonce storage (recommended in production).",
+    )
+    serve.add_argument(
+        "--replay-redis-url",
+        help="Redis URL for distributed replay cache (shared across nodes).",
+    )
+    serve.add_argument(
+        "--replay-redis-prefix",
+        default="a2a:replay",
+        help="Redis key prefix for replay entries.",
     )
     serve.add_argument(
         "--admission-max-concurrent",
@@ -133,6 +143,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     serve.add_argument("--audit-log-file", help="Append-only audit log path")
     serve.add_argument("--audit-signing-key", help="Ed25519 private key path for signing audit entries")
+    serve.add_argument("--audit-anchor-url", help="Optional HTTP(S) endpoint for external audit anchoring")
+    serve.add_argument("--audit-anchor-token", help="Bearer token for audit anchor endpoint")
+    serve.add_argument("--audit-anchor-timeout-s", type=float, default=5.0, help="Audit anchor HTTP timeout seconds")
+    serve.add_argument(
+        "--audit-anchor-fail-closed",
+        action="store_true",
+        help="Fail request processing if audit anchoring fails",
+    )
+    serve.add_argument("--audit-anchor-tls-ca-file", help="CA bundle for audit anchor TLS")
+    serve.add_argument("--audit-anchor-tls-client-cert-file", help="Client cert PEM for audit anchor mTLS")
+    serve.add_argument("--audit-anchor-tls-client-key-file", help="Client key PEM for audit anchor mTLS")
+    serve.add_argument(
+        "--audit-anchor-tls-insecure-skip-verify",
+        action="store_true",
+        help="Skip audit anchor TLS verification (debug only)",
+    )
     serve.add_argument(
         "--allow-tool",
         action="append",
@@ -144,6 +170,19 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=4096,
         help="Maximum JSON-serialized bytes for payload.args in toolcall execution",
+    )
+    serve.add_argument(
+        "--tool-policy-file",
+        help="JSON policy for per-agent tool grants and per-tool required scopes",
+    )
+    serve.add_argument("--version-policy-file", help="JSON runtime version/deprecation policy")
+    serve.add_argument(
+        "--trust-sync-verify-key-file",
+        help="Ed25519 public key path used to verify trustsync.v1 propose updates",
+    )
+    serve.add_argument(
+        "--session-binding-signing-key-file",
+        help="Ed25519 private key path used to sign session.v1 binding acknowledgements",
     )
     serve.add_argument(
         "--handler-spec",
@@ -176,6 +215,14 @@ def main(argv: list[str] | None = None) -> int:
     send.add_argument("--timeout", type=float, default=10.0, help="HTTP request timeout in seconds")
     send.add_argument("--retry-attempts", type=int, default=0, help="Retry attempts on network timeout/failure")
     send.add_argument("--retry-backoff-s", type=float, default=0.0, help="Exponential backoff base in seconds")
+    send.add_argument("--tls-ca-file", help="CA bundle for HTTPS server verification")
+    send.add_argument("--tls-client-cert-file", help="Client certificate PEM for mTLS")
+    send.add_argument("--tls-client-key-file", help="Client private key PEM for mTLS")
+    send.add_argument(
+        "--tls-insecure-skip-verify",
+        action="store_true",
+        help="Skip TLS certificate verification (debug only)",
+    )
     send.add_argument(
         "--auto-negotiate",
         action="store_true",
@@ -254,7 +301,16 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     prod_mode = args.deployment_mode == "prod"
     effective_secure_required = bool(args.secure_required or prod_mode)
 
-    replay_cache: ReplayCache | SQLiteReplayCache | None = None
+    replay_cache: ReplayCache | SQLiteReplayCache | RedisReplayCache | None = None
+    version_policy = None
+    if args.version_policy_file:
+        try:
+            raw_version_policy = json.loads(pathlib.Path(args.version_policy_file).read_text(encoding="utf-8"))
+            version_policy = parse_runtime_version_policy(raw_version_policy)
+        except Exception as exc:
+            print(f"failed to load version policy: {exc}", file=sys.stderr)
+            return 2
+
     secure_policy_enabled = bool(
         effective_secure_required
         or args.trusted_signing_keys_file
@@ -269,7 +325,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     effective_replay_protection = bool(args.replay_protection or secure_policy_enabled or prod_mode)
 
-    security_policy = None
+    security_policy: SecurityPolicy | None = None
     if secure_policy_enabled:
         try:
             key_registry = _load_key_registry(args.key_registry_file) if args.key_registry_file else {}
@@ -325,6 +381,23 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             decrypt_private_keys=decrypt_private_keys,
         )
 
+    trust_policy_manager = SecurityPolicyManager(security_policy) if security_policy is not None else None
+    trust_sync_verify_key = None
+    if args.trust_sync_verify_key_file:
+        try:
+            trust_sync_verify_key = _load_key_material(args.trust_sync_verify_key_file)
+        except Exception as exc:
+            print(f"failed to load trust sync verify key: {exc}", file=sys.stderr)
+            return 2
+
+    session_binding_signing_key = None
+    if args.session_binding_signing_key_file:
+        try:
+            session_binding_signing_key = _load_key_material(args.session_binding_signing_key_file)
+        except Exception as exc:
+            print(f"failed to load session binding signing key: {exc}", file=sys.stderr)
+            return 2
+
     if prod_mode and not args.allow_insecure_http:
         if not args.tls_cert_file or not args.tls_key_file:
             print(
@@ -333,15 +406,34 @@ def _cmd_serve(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        if not args.replay_db_file:
-            print("prod deployment requires durable replay storage: --replay-db-file", file=sys.stderr)
+        if not args.replay_db_file and not args.replay_redis_url:
+            print(
+                "prod deployment requires durable replay storage: --replay-db-file or --replay-redis-url",
+                file=sys.stderr,
+            )
             return 2
 
     audit_chain = None
     if args.audit_log_file:
         try:
             signing_key = _load_key_material(args.audit_signing_key) if args.audit_signing_key else None
-            audit_chain = AuditChain(args.audit_log_file, signing_private_key=signing_key)
+            anchor = None
+            if args.audit_anchor_url:
+                anchor = HTTPAuditAnchor(
+                    args.audit_anchor_url,
+                    timeout_s=args.audit_anchor_timeout_s,
+                    token=args.audit_anchor_token,
+                    tls_ca_file=args.audit_anchor_tls_ca_file,
+                    tls_client_cert_file=args.audit_anchor_tls_client_cert_file,
+                    tls_client_key_file=args.audit_anchor_tls_client_key_file,
+                    tls_insecure_skip_verify=args.audit_anchor_tls_insecure_skip_verify,
+                )
+            audit_chain = AuditChain(
+                args.audit_log_file,
+                signing_private_key=signing_key,
+                anchor=anchor,
+                anchor_fail_closed=args.audit_anchor_fail_closed,
+            )
         except Exception as exc:
             print(f"failed to initialize audit chain: {exc}", file=sys.stderr)
             return 2
@@ -361,11 +453,27 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             return 2
         extra_handlers[ct] = handler
 
+    try:
+        tool_policy_overrides = _load_tool_policy(args.tool_policy_file) if args.tool_policy_file else {}
+    except Exception as exc:
+        print(f"failed to load tool policy: {exc}", file=sys.stderr)
+        return 2
+    base_allowed_tools = set(args.allow_tool)
+    file_allowed_tools = set(tool_policy_overrides.get("allowed_tools", set()))
+    effective_allowed_tools = base_allowed_tools | file_allowed_tools
     tool_policy = ToolExecutionPolicy(
-        allowed_tools=set(args.allow_tool),
+        allowed_tools=effective_allowed_tools,
+        allowed_tools_by_agent=tool_policy_overrides.get("allowed_tools_by_agent", {}),
+        required_scopes_by_tool=tool_policy_overrides.get("required_scopes_by_tool", {}),
         max_args_bytes=max(1, int(args.max_tool_args_bytes)),
     )
-    handler = make_default_handler(extra_handlers=extra_handlers, tool_execution_policy=tool_policy)
+    handler = make_default_handler(
+        extra_handlers=extra_handlers,
+        tool_execution_policy=tool_policy,
+        trust_policy_manager=trust_policy_manager,
+        trust_update_verify_key=trust_sync_verify_key,
+        session_binding_signing_key=session_binding_signing_key,
+    )
     admission_controller = AdmissionController(
         max_concurrent=max(1, int(args.admission_max_concurrent)),
         rate_limit_rps=max(0.0, float(args.admission_rate_rps)),
@@ -375,7 +483,13 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     try:
         if effective_replay_protection:
-            if args.replay_db_file:
+            if args.replay_redis_url:
+                replay_cache = RedisReplayCache(
+                    args.replay_redis_url,
+                    key_prefix=args.replay_redis_prefix,
+                    ttl_seconds=args.replay_ttl,
+                )
+            elif args.replay_db_file:
                 replay_cache = SQLiteReplayCache(
                     args.replay_db_file,
                     max_entries=args.replay_max_entries,
@@ -403,10 +517,10 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             admission_controller=admission_controller,
             admin_enabled=admin_enabled,
             admin_token=args.admin_token,
+            version_policy=version_policy,
         )
     except Exception as exc:
-        if isinstance(replay_cache, SQLiteReplayCache):
-            replay_cache.close()
+        _close_replay_cache(replay_cache)
         print(f"failed to initialize server: {exc}", file=sys.stderr)
         return 2
     scheme = "https" if args.tls_cert_file and args.tls_key_file else "http"
@@ -419,8 +533,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         pass
     finally:
         server.shutdown()
-        if isinstance(replay_cache, SQLiteReplayCache):
-            replay_cache.close()
+        _close_replay_cache(replay_cache)
     return 0
 
 
@@ -499,6 +612,10 @@ def _cmd_send(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         retry_attempts=args.retry_attempts,
         retry_backoff_s=args.retry_backoff_s,
+        tls_ca_file=args.tls_ca_file,
+        tls_client_cert_file=args.tls_client_cert_file,
+        tls_client_key_file=args.tls_client_key_file,
+        tls_insecure_skip_verify=args.tls_insecure_skip_verify,
     )
     print(json_dumps_pretty(response))
     return 0
@@ -658,6 +775,53 @@ def _load_json_list(path: str) -> list[str]:
     return decoded
 
 
+def _load_tool_policy(path: str) -> dict[str, Any]:
+    content = pathlib.Path(path).read_text(encoding="utf-8")
+    decoded = json.loads(content)
+    if not isinstance(decoded, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+
+    result: dict[str, Any] = {
+        "allowed_tools": set(),
+        "allowed_tools_by_agent": {},
+        "required_scopes_by_tool": {},
+    }
+
+    allowed_tools = decoded.get("allowed_tools")
+    if allowed_tools is not None:
+        if not isinstance(allowed_tools, list) or not all(isinstance(item, str) and item for item in allowed_tools):
+            raise ValueError("allowed_tools must be a non-empty string[]")
+        result["allowed_tools"] = set(allowed_tools)
+
+    allowed_by_agent = decoded.get("allowed_tools_by_agent")
+    if allowed_by_agent is not None:
+        if not isinstance(allowed_by_agent, dict):
+            raise ValueError("allowed_tools_by_agent must be an object")
+        parsed: dict[str, set[str]] = {}
+        for agent_id, tools in allowed_by_agent.items():
+            if not isinstance(agent_id, str) or not agent_id:
+                raise ValueError("allowed_tools_by_agent keys must be non-empty strings")
+            if not isinstance(tools, list) or not all(isinstance(item, str) and item for item in tools):
+                raise ValueError("allowed_tools_by_agent must map to non-empty string[]")
+            parsed[agent_id] = set(tools)
+        result["allowed_tools_by_agent"] = parsed
+
+    scopes_by_tool = decoded.get("required_scopes_by_tool")
+    if scopes_by_tool is not None:
+        if not isinstance(scopes_by_tool, dict):
+            raise ValueError("required_scopes_by_tool must be an object")
+        parsed_scopes: dict[str, str] = {}
+        for tool_name, scope in scopes_by_tool.items():
+            if not isinstance(tool_name, str) or not tool_name:
+                raise ValueError("required_scopes_by_tool keys must be non-empty strings")
+            if not isinstance(scope, str) or not scope:
+                raise ValueError("required_scopes_by_tool values must be non-empty strings")
+            parsed_scopes[tool_name] = scope
+        result["required_scopes_by_tool"] = parsed_scopes
+
+    return result
+
+
 def _load_key_registry(path: str) -> dict[str, Any]:
     content = pathlib.Path(path).read_text(encoding="utf-8")
     decoded = json.loads(content)
@@ -710,6 +874,14 @@ def _load_key_registry(path: str) -> dict[str, Any]:
         }
 
     return registry
+
+
+def _close_replay_cache(replay_cache: ReplayCache | SQLiteReplayCache | RedisReplayCache | None) -> None:
+    if replay_cache is None:
+        return
+    close_fn = getattr(replay_cache, "close", None)
+    if callable(close_fn):
+        close_fn()
 
 
 def _load_key_material(value: str) -> str:

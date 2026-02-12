@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .codec import canonical_bytes_for_signing
-from .utils import b64url_decode, b64url_encode, deep_copy
+from .utils import b64url_decode, b64url_encode, canonical_json_bytes, deep_copy
 
 
 class SecurityError(ValueError):
@@ -141,6 +141,54 @@ def verify_envelope_signature(
         return True
     except InvalidSignature as exc:
         raise SecurityError("signature verification failed") from exc
+
+
+def sign_detached_bytes(
+    payload: bytes,
+    private_key: str | bytes | Ed25519PrivateKey,
+) -> str:
+    """Create detached Ed25519 signature over arbitrary bytes (b64url output)."""
+    if not isinstance(payload, (bytes, bytearray)):
+        raise SecurityError("detached signature payload must be bytes")
+    signing_key = _load_ed25519_private_key(private_key)
+    signature = signing_key.sign(bytes(payload))
+    return b64url_encode(signature)
+
+
+def verify_detached_bytes(
+    payload: bytes,
+    signature_b64: str,
+    public_key: str | bytes | Ed25519PublicKey,
+) -> bool:
+    """Verify detached Ed25519 signature over arbitrary bytes."""
+    if not isinstance(payload, (bytes, bytearray)):
+        raise SecurityError("detached signature payload must be bytes")
+    if not isinstance(signature_b64, str) or not signature_b64:
+        raise SecurityError("detached signature value missing")
+    verify_key = _load_ed25519_public_key(public_key)
+    signature = b64url_decode(signature_b64)
+    try:
+        verify_key.verify(signature, bytes(payload))
+        return True
+    except InvalidSignature as exc:
+        raise SecurityError("detached signature verification failed") from exc
+
+
+def sign_detached_json(
+    payload: Any,
+    private_key: str | bytes | Ed25519PrivateKey,
+) -> str:
+    """Create detached signature over canonical JSON bytes."""
+    return sign_detached_bytes(canonical_json_bytes(payload), private_key)
+
+
+def verify_detached_json(
+    payload: Any,
+    signature_b64: str,
+    public_key: str | bytes | Ed25519PublicKey,
+) -> bool:
+    """Verify detached signature over canonical JSON bytes."""
+    return verify_detached_bytes(canonical_json_bytes(payload), signature_b64, public_key)
 
 
 def encrypt_payload(

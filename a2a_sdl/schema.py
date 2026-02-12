@@ -61,6 +61,14 @@ TOOLCALL_V1_SCHEMA: dict[str, Any] = {
         "call_id": {"type": "string", "minLength": 1},
         "args": {"type": "object"},
         "expect": {"type": "object"},
+        "authz": {
+            "type": "object",
+            "properties": {
+                "scopes": {"type": "array", "items": {"type": "string"}},
+                "delegated_by": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+        },
     },
 }
 
@@ -122,6 +130,39 @@ NEGOTIATION_V1_SCHEMA: dict[str, Any] = {
         "have": {"type": "object"},
         "ask": {"type": "array", "items": {"type": "string"}},
         "supported_ct": {"type": "array", "items": {"type": "string"}},
+        "session_binding": {"type": "object"},
+    },
+}
+
+TRUSTSYNC_V1_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["op"],
+    "properties": {
+        "op": {"enum": ["discover", "propose"]},
+        "merge": {"type": "boolean"},
+        "registry": {"type": "object"},
+        "signature": {"type": "string"},
+        "status": {"enum": ["snapshot", "accepted", "rejected"]},
+        "message": {"type": "string"},
+        "registry_hash": {"type": "string"},
+        "snapshot": {"type": "object"},
+        "source_agent": {"type": "string"},
+    },
+}
+
+SESSION_V1_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["op", "profile", "nonce"],
+    "properties": {
+        "op": {"enum": ["open", "ack"]},
+        "profile": {"type": "object"},
+        "nonce": {"type": "string", "minLength": 8},
+        "expires": {"type": "string"},
+        "accepted": {"type": "boolean"},
+        "binding_id": {"type": "string"},
+        "binding_sig": {"type": "string"},
+        "binding_alg": {"type": "string"},
+        "message": {"type": "string"},
     },
 }
 
@@ -133,6 +174,8 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
     "artifact.v1": ARTIFACT_V1_SCHEMA,
     "error.v1": ERROR_V1_SCHEMA,
     "negotiation.v1": NEGOTIATION_V1_SCHEMA,
+    "trustsync.v1": TRUSTSYNC_V1_SCHEMA,
+    "session.v1": SESSION_V1_SCHEMA,
 }
 
 

@@ -24,6 +24,7 @@ from a2a_sdl.transport_http import (
     send_http,
     send_http_with_auto_downgrade,
 )
+from a2a_sdl.versioning import parse_runtime_version_policy
 
 from tests.test_helpers import make_task_envelope
 
@@ -352,6 +353,11 @@ class HTTPTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             send_http("http://user:pass@127.0.0.1:8080/a2a", req, encoding="json")
 
+    def test_send_http_rejects_tls_options_on_http_url(self) -> None:
+        req = make_task_envelope()
+        with self.assertRaises(ValueError):
+            send_http("http://127.0.0.1:8080/a2a", req, encoding="json", tls_insecure_skip_verify=True)
+
     def test_admission_controller_rate_limits_requests(self) -> None:
         from a2a_sdl.handlers import default_handler
 
@@ -374,6 +380,29 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(second["ct"], "error.v1")
             self.assertEqual(second["payload"]["code"], "BAD_REQUEST")
             self.assertEqual(second["payload"]["details"]["reason"], "rate_limit")
+        finally:
+            server.shutdown()
+            thread.join(timeout=1)
+
+    def test_runtime_version_policy_deprecates_content_type(self) -> None:
+        from a2a_sdl.handlers import default_handler
+
+        version_policy = parse_runtime_version_policy(
+            {
+                "deprecated_content_types": {"task.v1": "2000-01-01T00:00:00Z"},
+            }
+        )
+        server = A2AHTTPServer("127.0.0.1", 0, handler=default_handler, version_policy=version_policy)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        time.sleep(0.05)
+
+        try:
+            port = server._server.server_address[1]
+            url = f"http://127.0.0.1:{port}/a2a"
+            res = send_http(url, make_task_envelope(), encoding="json", timeout=10.0)
+            self.assertEqual(res["ct"], "error.v1")
+            self.assertIn("deprecated", res["payload"]["message"])
         finally:
             server.shutdown()
             thread.join(timeout=1)

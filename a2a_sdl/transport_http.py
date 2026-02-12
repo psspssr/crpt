@@ -34,6 +34,7 @@ from .policy import SecurityPolicy, enforce_request_security
 from .replay import ReplayCache, ReplayCacheProtocol
 from .schema import get_builtin_descriptor
 from .utils import new_message_id
+from .versioning import RuntimeVersionPolicy
 
 
 MessageHandler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -198,6 +199,7 @@ class A2AHTTPServer:
         admission_controller: AdmissionController | None = None,
         admin_enabled: bool = False,
         admin_token: str | None = None,
+        version_policy: RuntimeVersionPolicy | None = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -212,6 +214,7 @@ class A2AHTTPServer:
         self.admission_controller = admission_controller
         self.admin_enabled = admin_enabled
         self.admin_token = admin_token
+        self.version_policy = version_policy
 
         needs_replay = enforce_replay or bool(security_policy and security_policy.require_replay)
         self.replay_cache = replay_cache or (ReplayCache() if needs_replay else None)
@@ -258,6 +261,7 @@ class A2AHTTPServer:
         admin_enabled = self.admin_enabled
         admin_token = self.admin_token
         metrics = self._metrics
+        version_policy = self.version_policy
         server_ref = self
 
         class RequestHandler(BaseHTTPRequestHandler):
@@ -436,7 +440,7 @@ class A2AHTTPServer:
                             audit_chain=audit_chain,
                         )
                         try:
-                            validate_envelope(response_envelope)
+                            validate_envelope(response_envelope, version_policy=version_policy)
                         except Exception as exc:
                             response_envelope = make_error_response(
                                 request=request_envelope or _fallback_request_envelope(),
@@ -453,7 +457,11 @@ class A2AHTTPServer:
 
             def _process_request(self, request_envelope: dict[str, Any]) -> dict[str, Any]:
                 try:
-                    validate_envelope(request_envelope, allow_schema_uri=False)
+                    validate_envelope(
+                        request_envelope,
+                        allow_schema_uri=False,
+                        version_policy=version_policy,
+                    )
                     if security_policy is not None:
                         if enforce_replay and replay_cache is not None and not security_policy.require_replay:
                             _enforce_replay(request_envelope, replay_cache)
@@ -473,7 +481,7 @@ class A2AHTTPServer:
 
                 try:
                     response_envelope = handler_fn(request_envelope)
-                    validate_envelope(response_envelope)
+                    validate_envelope(response_envelope, version_policy=version_policy)
                     return response_envelope
                 except EnvelopeValidationError as exc:
                     metrics.on_handler_error()
@@ -516,6 +524,10 @@ def send_http(
     timeout: float = 10.0,
     retry_attempts: int = 0,
     retry_backoff_s: float = 0.0,
+    tls_ca_file: str | None = None,
+    tls_client_cert_file: str | None = None,
+    tls_client_key_file: str | None = None,
+    tls_insecure_skip_verify: bool = False,
 ) -> dict[str, Any]:
     _validate_http_url(url)
     validate_envelope(envelope, allow_schema_uri=False)
@@ -528,6 +540,13 @@ def send_http(
         headers={"Content-Type": content_type, "Accept": content_type},
         method="POST",
     )
+    opener = _build_http_client_opener(
+        url=url,
+        tls_ca_file=tls_ca_file,
+        tls_client_cert_file=tls_client_cert_file,
+        tls_client_key_file=tls_client_key_file,
+        tls_insecure_skip_verify=tls_insecure_skip_verify,
+    )
 
     attempts = max(0, int(retry_attempts))
     body: bytes | None = None
@@ -537,7 +556,7 @@ def send_http(
     for attempt in range(attempts + 1):
         try:
             # URL scheme/host are validated via _validate_http_url.
-            with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
+            with opener.open(request, timeout=timeout) as response:  # nosec B310
                 body = response.read()
                 response_content_type = response.headers.get("Content-Type")
             break
@@ -551,6 +570,7 @@ def send_http(
             ConnectionResetError,
             ConnectionAbortedError,
             BrokenPipeError,
+            ssl.SSLError,
         ) as exc:
             last_network_error = exc
             if attempt >= attempts:
@@ -577,6 +597,10 @@ def send_http_with_auto_downgrade(
     timeout: float = 10.0,
     retry_attempts: int = 0,
     retry_backoff_s: float = 0.0,
+    tls_ca_file: str | None = None,
+    tls_client_cert_file: str | None = None,
+    tls_client_key_file: str | None = None,
+    tls_insecure_skip_verify: bool = False,
 ) -> dict[str, Any]:
     """Send and, on UNSUPPORTED_CT, retry with negotiated downgrade behavior."""
     first_response = send_http(
@@ -586,6 +610,10 @@ def send_http_with_auto_downgrade(
         timeout=timeout,
         retry_attempts=retry_attempts,
         retry_backoff_s=retry_backoff_s,
+        tls_ca_file=tls_ca_file,
+        tls_client_cert_file=tls_client_cert_file,
+        tls_client_key_file=tls_client_key_file,
+        tls_insecure_skip_verify=tls_insecure_skip_verify,
     )
 
     action = _extract_unsupported_ct_action(first_response)
@@ -608,6 +636,10 @@ def send_http_with_auto_downgrade(
                 timeout=timeout,
                 retry_attempts=retry_attempts,
                 retry_backoff_s=retry_backoff_s,
+                tls_ca_file=tls_ca_file,
+                tls_client_cert_file=tls_client_cert_file,
+                tls_client_key_file=tls_client_key_file,
+                tls_insecure_skip_verify=tls_insecure_skip_verify,
             )
         except EnvelopeValidationError:
             # Fallback to explicit negotiation if downgrade payload is incompatible.
@@ -622,6 +654,10 @@ def send_http_with_auto_downgrade(
             timeout=timeout,
             retry_attempts=retry_attempts,
             retry_backoff_s=retry_backoff_s,
+            tls_ca_file=tls_ca_file,
+            tls_client_cert_file=tls_client_cert_file,
+            tls_client_key_file=tls_client_key_file,
+            tls_insecure_skip_verify=tls_insecure_skip_verify,
         )
 
     return first_response
@@ -639,6 +675,32 @@ def _validate_http_url(url: str) -> None:
         raise ValueError("url must not include a fragment")
     if parsed.path and not parsed.path.startswith("/"):
         raise ValueError("url path must be absolute")
+
+
+def _build_http_client_opener(
+    *,
+    url: str,
+    tls_ca_file: str | None,
+    tls_client_cert_file: str | None,
+    tls_client_key_file: str | None,
+    tls_insecure_skip_verify: bool,
+) -> urllib.request.OpenerDirector:
+    parsed = urlparse(url)
+    if parsed.scheme == "http":
+        if tls_ca_file or tls_client_cert_file or tls_client_key_file or tls_insecure_skip_verify:
+            raise ValueError("TLS client options require an https URL")
+        return urllib.request.build_opener()
+
+    if bool(tls_client_cert_file) != bool(tls_client_key_file):
+        raise ValueError("tls_client_cert_file and tls_client_key_file must be provided together")
+
+    context = ssl.create_default_context(cafile=tls_ca_file)
+    if tls_insecure_skip_verify:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    if tls_client_cert_file and tls_client_key_file:
+        context.load_cert_chain(certfile=tls_client_cert_file, keyfile=tls_client_key_file)
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
 
 
 def create_fastapi_app(handler: MessageHandler):

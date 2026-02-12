@@ -11,6 +11,7 @@ from .envelope import EnvelopeValidationError, make_error_response, validate_env
 from .policy import SecurityPolicy, enforce_request_security
 from .replay import ReplayCache, ReplayCacheProtocol
 from .transport_http import _enforce_replay, _fallback_request_envelope, _validation_error_response
+from .versioning import RuntimeVersionPolicy
 
 websockets: Any
 try:
@@ -30,11 +31,12 @@ async def ws_send(
     timeout: float = 10.0,
     retry_attempts: int = 0,
     retry_backoff_s: float = 0.0,
+    version_policy: RuntimeVersionPolicy | None = None,
 ) -> dict[str, Any]:
     if websockets is None:
         raise RuntimeError("websockets is not installed; install with a2a-sdl[ws]")
 
-    validate_envelope(envelope, allow_schema_uri=False)
+    validate_envelope(envelope, allow_schema_uri=False, version_policy=version_policy)
     payload = encode_bytes(envelope, encoding=encoding)
 
     attempts = max(0, int(retry_attempts))
@@ -63,7 +65,7 @@ async def ws_send(
         response_bytes = response
 
     decoded = decode_bytes(response_bytes, encoding=encoding)
-    validate_envelope(decoded, allow_schema_uri=False)
+    validate_envelope(decoded, allow_schema_uri=False, version_policy=version_policy)
     return decoded
 
 
@@ -76,6 +78,7 @@ async def ws_serve(
     replay_cache: ReplayCacheProtocol | None = None,
     enforce_replay: bool = False,
     security_policy: SecurityPolicy | None = None,
+    version_policy: RuntimeVersionPolicy | None = None,
 ):
     if websockets is None:
         raise RuntimeError("websockets is not installed; install with a2a-sdl[ws]")
@@ -92,6 +95,7 @@ async def ws_serve(
                 enforce_replay=enforce_replay,
                 replay_cache=cache,
                 security_policy=security_policy,
+                version_policy=version_policy,
             )
             await connection.send(out)
 
@@ -107,6 +111,7 @@ def process_ws_payload(
     enforce_replay: bool = False,
     replay_cache: ReplayCacheProtocol | None = None,
     security_policy: SecurityPolicy | None = None,
+    version_policy: RuntimeVersionPolicy | None = None,
 ) -> bytes:
     """Process one websocket frame into one websocket frame."""
     if isinstance(payload, str):
@@ -126,7 +131,11 @@ def process_ws_payload(
         return encode_bytes(response_envelope, encoding=encoding)
 
     try:
-        validate_envelope(request_envelope, allow_schema_uri=False)
+        validate_envelope(
+            request_envelope,
+            allow_schema_uri=False,
+            version_policy=version_policy,
+        )
         if security_policy is not None:
             if enforce_replay and replay_cache is not None and not security_policy.require_replay:
                 _enforce_replay(request_envelope, replay_cache)
@@ -146,7 +155,7 @@ def process_ws_payload(
 
     try:
         response_envelope = handler(request_envelope)
-        validate_envelope(response_envelope)
+        validate_envelope(response_envelope, version_policy=version_policy)
     except EnvelopeValidationError as exc:
         response_envelope = make_error_response(
             request=request_envelope,

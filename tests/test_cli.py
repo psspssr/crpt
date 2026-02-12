@@ -191,6 +191,60 @@ class CLITests(unittest.TestCase):
         self.assertTrue(isinstance(sec.get("replay"), dict))
         self.assertEqual(sec["sig"]["alg"], "ed25519")
 
+    def test_send_passes_tls_options(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_send_http(url: str, envelope: dict, **kwargs):
+            _ = envelope
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return build_envelope(
+                msg_type="res",
+                from_identity={"agent_id": "did:key:server", "name": "s", "instance": "i", "role": "executor"},
+                to_identity={"agent_id": "did:key:sender", "name": "c", "instance": "i", "role": "planner"},
+                content_type="error.v1",
+                payload={
+                    "code": "BAD_REQUEST",
+                    "message": "stub",
+                    "details": {},
+                    "retryable": False,
+                },
+                schema=get_builtin_descriptor("error.v1"),
+            )
+
+        payload_json = (
+            '{"kind":"task.v1","goal":"x","inputs":{},"constraints":{"time_budget_s":1,'
+            '"compute_budget":"low","safety":{}},"deliverables":[{"type":"text",'
+            '"description":"d"}],"acceptance":["ok"],"context":{}}'
+        )
+        argv = [
+            "send",
+            "--url",
+            "https://127.0.0.1:9999/a2a",
+            "--ct",
+            "task.v1",
+            "--payload-json",
+            payload_json,
+            "--tls-ca-file",
+            "/tmp/ca.pem",
+            "--tls-client-cert-file",
+            "/tmp/client.crt",
+            "--tls-client-key-file",
+            "/tmp/client.key",
+            "--tls-insecure-skip-verify",
+        ]
+        with patch("a2a_sdl.cli.send_http", side_effect=fake_send_http):
+            with redirect_stdout(io.StringIO()):
+                code = main(argv)
+
+        self.assertEqual(code, 0)
+        kwargs = captured["kwargs"]
+        assert isinstance(kwargs, dict)
+        self.assertEqual(kwargs["tls_ca_file"], "/tmp/ca.pem")
+        self.assertEqual(kwargs["tls_client_cert_file"], "/tmp/client.crt")
+        self.assertEqual(kwargs["tls_client_key_file"], "/tmp/client.key")
+        self.assertTrue(kwargs["tls_insecure_skip_verify"])
+
     def test_serve_secure_required_needs_key_files(self) -> None:
         with redirect_stdout(io.StringIO()):
             with patch("sys.stderr", new_callable=io.StringIO) as stderr:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
+import hashlib
 from collections import OrderedDict
 from pathlib import Path
 from typing import Protocol
@@ -118,3 +119,43 @@ class SQLiteReplayCache:
             """,
             (overflow,),
         )
+
+
+class RedisReplayCache:
+    """Redis-backed replay store for multi-node deployments."""
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        key_prefix: str = "a2a:replay",
+        ttl_seconds: int = 600,
+    ) -> None:
+        try:
+            import redis
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError("redis package is required for RedisReplayCache") from exc
+
+        if not isinstance(url, str) or not url:
+            raise ValueError("redis replay url must be a non-empty string")
+        if not isinstance(key_prefix, str) or not key_prefix:
+            raise ValueError("redis replay key_prefix must be a non-empty string")
+
+        self._redis = redis.Redis.from_url(url)
+        self.key_prefix = key_prefix.rstrip(":")
+        self.ttl_seconds = max(1, int(ttl_seconds))
+
+    def close(self) -> None:
+        close_fn = getattr(self._redis, "close", None)
+        if callable(close_fn):
+            close_fn()
+
+    def seen_or_add(self, agent_id: str, nonce: str, now: float | None = None) -> bool:
+        _ = now
+        key = self._build_key(agent_id, nonce)
+        inserted = self._redis.set(key, b"1", ex=self.ttl_seconds, nx=True)
+        return not bool(inserted)
+
+    def _build_key(self, agent_id: str, nonce: str) -> str:
+        digest = hashlib.sha256(f"{agent_id}\n{nonce}".encode("utf-8")).hexdigest()
+        return f"{self.key_prefix}:{digest}"

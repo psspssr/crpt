@@ -10,6 +10,8 @@ SUPPORTED_CONTENT_TYPES = {
     "artifact.v1",
     "error.v1",
     "negotiation.v1",
+    "trustsync.v1",
+    "session.v1",
 }
 
 DEFAULT_LIMITS = {

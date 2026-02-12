@@ -4,7 +4,7 @@ import datetime as dt
 import unittest
 
 from a2a_sdl.envelope import EnvelopeValidationError
-from a2a_sdl.policy import SecurityPolicy, enforce_request_security
+from a2a_sdl.policy import SecurityPolicy, SecurityPolicyManager, enforce_request_security
 from a2a_sdl.replay import ReplayCache
 from a2a_sdl.security import (
     encrypt_payload,
@@ -97,6 +97,25 @@ class SecurityPolicyTests(unittest.TestCase):
 
         with self.assertRaises(EnvelopeValidationError):
             enforce_request_security(env, policy, ReplayCache())
+
+    def test_security_policy_manager_apply_registry(self) -> None:
+        manager = SecurityPolicyManager(SecurityPolicy())
+        before = manager.snapshot_hash()
+        updated_hash = manager.apply_registry(
+            {
+                "trusted_signing_keys": {"kid-1": "pub-1"},
+                "required_kid_by_agent": {"did:key:agent-a": "kid-1"},
+                "allowed_kids_by_agent": {"did:key:agent-a": ["kid-1", "kid-2"]},
+                "revoked_kids": ["kid-old"],
+                "kid_not_after": {"kid-1": "2099-01-01T00:00:00Z"},
+            },
+            merge=True,
+        )
+        self.assertTrue(updated_hash.startswith("sha256:"))
+        self.assertNotEqual(before, updated_hash)
+        snapshot = manager.snapshot()
+        self.assertIn("kid-1", snapshot["trusted_signing_keys"])
+        self.assertIn("kid-old", snapshot["revoked_kids"])
 
 
 if __name__ == "__main__":

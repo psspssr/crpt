@@ -63,6 +63,47 @@ class AuditTests(unittest.TestCase):
             with self.assertRaises(AuditError):
                 verify_audit_chain(path, signing_public_key=keys["public_key_pem"], require_signatures=True)
 
+    def test_audit_chain_anchor_receipt(self) -> None:
+        class _Anchor:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def publish(self, *, entry_hash: str, entry: dict) -> None:
+                _ = entry
+                self.calls.append(entry_hash)
+
+        anchor = _Anchor()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "audit.log"
+            chain = AuditChain(path, anchor=anchor)
+            receipt = chain.append({"event": "request", "id": "1"})
+            self.assertEqual(receipt["anchor"]["status"], "anchored")
+            self.assertEqual(len(anchor.calls), 1)
+
+    def test_audit_chain_anchor_fail_open(self) -> None:
+        class _FailingAnchor:
+            def publish(self, *, entry_hash: str, entry: dict) -> None:
+                _ = (entry_hash, entry)
+                raise RuntimeError("anchor offline")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "audit.log"
+            chain = AuditChain(path, anchor=_FailingAnchor(), anchor_fail_closed=False)
+            receipt = chain.append({"event": "request", "id": "1"})
+            self.assertEqual(receipt["anchor"]["status"], "failed")
+
+    def test_audit_chain_anchor_fail_closed(self) -> None:
+        class _FailingAnchor:
+            def publish(self, *, entry_hash: str, entry: dict) -> None:
+                _ = (entry_hash, entry)
+                raise RuntimeError("anchor offline")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "audit.log"
+            chain = AuditChain(path, anchor=_FailingAnchor(), anchor_fail_closed=True)
+            with self.assertRaises(AuditError):
+                chain.append({"event": "request", "id": "1"})
+
 
 if __name__ == "__main__":
     unittest.main()

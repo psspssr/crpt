@@ -4,7 +4,9 @@ import unittest
 
 from a2a_sdl.handlers import ToolExecutionPolicy, default_handler, make_default_handler
 from a2a_sdl.envelope import validate_envelope
+from a2a_sdl.policy import SecurityPolicy, SecurityPolicyManager
 from a2a_sdl.schema import get_builtin_descriptor
+from a2a_sdl.security import generate_signing_keypair, sign_detached_json, verify_detached_json
 
 from tests.test_helpers import make_task_envelope, make_trace
 
@@ -127,6 +129,116 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(res["ct"], "toolresult.v1")
         self.assertFalse(res["payload"]["ok"])
         self.assertIn("denied by execution policy", " ".join(res["payload"]["logs"]))
+
+    def test_tool_execution_policy_agent_scope(self) -> None:
+        handler = make_default_handler(
+            tool_execution_policy=ToolExecutionPolicy(
+                allowed_tools_by_agent={"did:key:agent-a": {"math.add"}},
+                required_scopes_by_tool={"math.add": "tool:math.add"},
+                max_args_bytes=1024,
+            )
+        )
+        req = make_task_envelope()
+        req["from"]["agent_id"] = "did:key:agent-a"
+        req["ct"] = "toolcall.v1"
+        req["schema"] = get_builtin_descriptor("toolcall.v1")
+        req["payload"] = {
+            "tool": "math.add",
+            "call_id": "scope-ok",
+            "args": {"values": [1, 2]},
+            "expect": {},
+            "authz": {"scopes": ["tool:math.add"]},
+        }
+        ok = handler(req)
+        self.assertTrue(ok["payload"]["ok"])
+
+        denied_req = make_task_envelope()
+        denied_req["from"]["agent_id"] = "did:key:agent-a"
+        denied_req["ct"] = "toolcall.v1"
+        denied_req["schema"] = get_builtin_descriptor("toolcall.v1")
+        denied_req["payload"] = {
+            "tool": "math.add",
+            "call_id": "scope-miss",
+            "args": {"values": [1, 2]},
+            "expect": {},
+            "authz": {"scopes": []},
+        }
+        denied = handler(denied_req)
+        self.assertFalse(denied["payload"]["ok"])
+        self.assertIn("requires scope", " ".join(denied["payload"]["logs"]))
+
+    def test_trustsync_discover_returns_snapshot(self) -> None:
+        manager = SecurityPolicyManager(
+            SecurityPolicy(
+                trusted_signing_keys={"kid-1": "pub-1"},
+                required_kid_by_agent={"did:key:agent-a": "kid-1"},
+            )
+        )
+        handler = make_default_handler(trust_policy_manager=manager)
+
+        req = make_task_envelope()
+        req["ct"] = "trustsync.v1"
+        req["schema"] = get_builtin_descriptor("trustsync.v1")
+        req["payload"] = {"op": "discover"}
+        res = handler(req)
+        self.assertEqual(res["ct"], "trustsync.v1")
+        self.assertEqual(res["payload"]["status"], "snapshot")
+        self.assertIn("trusted_signing_keys", res["payload"]["snapshot"])
+        self.assertTrue(res["payload"]["registry_hash"].startswith("sha256:"))
+
+    def test_trustsync_propose_applies_update(self) -> None:
+        keys = generate_signing_keypair()
+        manager = SecurityPolicyManager(SecurityPolicy())
+        handler = make_default_handler(
+            trust_policy_manager=manager,
+            trust_update_verify_key=keys["public_key_b64"],
+        )
+        registry = {
+            "trusted_signing_keys": {"kid-new": "pub-new"},
+            "revoked_kids": ["kid-old"],
+        }
+        signature = sign_detached_json(registry, keys["private_key_b64"])
+
+        req = make_task_envelope()
+        req["ct"] = "trustsync.v1"
+        req["schema"] = get_builtin_descriptor("trustsync.v1")
+        req["payload"] = {"op": "propose", "registry": registry, "signature": signature, "merge": True}
+        res = handler(req)
+        self.assertEqual(res["ct"], "trustsync.v1")
+        self.assertEqual(res["payload"]["status"], "accepted")
+        self.assertIn("kid-new", res["payload"]["snapshot"]["trusted_signing_keys"])
+
+    def test_session_open_returns_signed_binding(self) -> None:
+        keys = generate_signing_keypair()
+        handler = make_default_handler(session_binding_signing_key=keys["private_key_b64"])
+
+        req = make_task_envelope()
+        req["ct"] = "session.v1"
+        req["schema"] = get_builtin_descriptor("session.v1")
+        req["payload"] = {
+            "op": "open",
+            "profile": {"ct": ["task.v1"], "mode": "enc+sig"},
+            "nonce": "nonce-1234",
+        }
+        res = handler(req)
+        self.assertEqual(res["ct"], "session.v1")
+        self.assertTrue(res["payload"]["accepted"])
+        self.assertIn("binding_sig", res["payload"])
+
+        binding_doc = {
+            "from_agent": req["from"]["agent_id"],
+            "to_agent": req["to"]["agent_id"],
+            "profile": req["payload"]["profile"],
+            "nonce": req["payload"]["nonce"],
+            "expires": res["payload"]["expires"],
+        }
+        self.assertTrue(
+            verify_detached_json(
+                binding_doc,
+                res["payload"]["binding_sig"],
+                keys["public_key_b64"],
+            )
+        )
 
 
 if __name__ == "__main__":

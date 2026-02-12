@@ -11,8 +11,10 @@ from typing import Any
 
 from .constants import DEFAULT_LIMITS, PROTOCOL_VERSION, SUPPORTED_CONTENT_TYPES
 from .envelope import build_envelope, derive_response_trace, make_error_response
+from .policy import SecurityPolicyManager
 from .schema import get_builtin_descriptor
-from .utils import sha256_prefixed
+from .security import SecurityError, sign_detached_json, verify_detached_json
+from .utils import canonical_json_bytes, sha256_prefixed
 from .versioning import versioning_payload_metadata
 
 HandlerFn = Callable[[dict[str, Any]], dict[str, Any]]
@@ -24,10 +26,39 @@ class ToolExecutionPolicy:
     """Policy guard for tool execution safety."""
 
     allowed_tools: set[str] = field(default_factory=set)
+    allowed_tools_by_agent: dict[str, set[str]] = field(default_factory=dict)
+    required_scopes_by_tool: dict[str, str] = field(default_factory=dict)
     max_args_bytes: int = 4096
 
     def is_allowed(self, tool_name: str) -> bool:
-        return tool_name in self.allowed_tools
+        if self.allowed_tools:
+            return tool_name in self.allowed_tools
+        return bool(self.allowed_tools_by_agent)
+
+    def check(
+        self,
+        *,
+        tool_name: str,
+        agent_id: str,
+        scopes: set[str] | None,
+    ) -> tuple[bool, str | None]:
+        if not self.is_allowed(tool_name):
+            return False, f"tool '{tool_name}' denied by execution policy"
+
+        if self.allowed_tools_by_agent:
+            allowed_for_agent = self.allowed_tools_by_agent.get(agent_id)
+            if allowed_for_agent is None:
+                return False, f"agent '{agent_id}' has no tool grants"
+            if tool_name not in allowed_for_agent:
+                return False, f"agent '{agent_id}' is not allowed to use tool '{tool_name}'"
+
+        required_scope = self.required_scopes_by_tool.get(tool_name)
+        if required_scope is not None:
+            scope_set = scopes or set()
+            if required_scope not in scope_set:
+                return False, f"tool '{tool_name}' requires scope '{required_scope}'"
+
+        return True, None
 
 
 class ToolRegistry:
@@ -183,6 +214,13 @@ def _make_toolcall_handler(
         args = payload.get("args")
         call_id = payload.get("call_id", "unknown")
         start = time.perf_counter()
+        from_identity = request.get("from")
+        agent_id = (
+            str(from_identity.get("agent_id"))
+            if isinstance(from_identity, dict) and isinstance(from_identity.get("agent_id"), str)
+            else "did:key:unknown"
+        )
+        scopes = _extract_authz_scopes(payload.get("authz"))
 
         ok = False
         result: Any = {}
@@ -192,19 +230,29 @@ def _make_toolcall_handler(
             logs.append("missing or invalid payload.tool")
         elif not isinstance(args, dict):
             logs.append("missing or invalid payload.args")
-        elif execution_policy is not None and not execution_policy.is_allowed(tool_name):
-            logs.append(f"tool '{tool_name}' denied by execution policy")
         elif execution_policy is not None and len(json.dumps(args, sort_keys=True)) > execution_policy.max_args_bytes:
             logs.append(f"tool '{tool_name}' args exceed max_args_bytes")
         elif not tool_registry.has(tool_name):
             logs.append(f"unknown tool '{tool_name}'")
         else:
-            try:
-                result = tool_registry.execute(tool_name, args)
-                ok = True
-                logs.append(f"tool '{tool_name}' executed")
-            except Exception as exc:
-                logs.append(f"tool '{tool_name}' failed: {type(exc).__name__}: {exc}")
+            if execution_policy is not None:
+                allowed, reason = execution_policy.check(tool_name=tool_name, agent_id=agent_id, scopes=scopes)
+                if not allowed:
+                    logs.append(reason or f"tool '{tool_name}' denied by execution policy")
+                else:
+                    try:
+                        result = tool_registry.execute(tool_name, args)
+                        ok = True
+                        logs.append(f"tool '{tool_name}' executed")
+                    except Exception as exc:
+                        logs.append(f"tool '{tool_name}' failed: {type(exc).__name__}: {exc}")
+            else:
+                try:
+                    result = tool_registry.execute(tool_name, args)
+                    ok = True
+                    logs.append(f"tool '{tool_name}' executed")
+                except Exception as exc:
+                    logs.append(f"tool '{tool_name}' failed: {type(exc).__name__}: {exc}")
 
         latency_ms = int((time.perf_counter() - start) * 1000)
         result_payload = {
@@ -212,7 +260,11 @@ def _make_toolcall_handler(
             "ok": ok,
             "result": result,
             "logs": logs,
-            "metrics": {"latency_ms": latency_ms, "tool": tool_name if isinstance(tool_name, str) else ""},
+            "metrics": {
+                "latency_ms": latency_ms,
+                "tool": tool_name if isinstance(tool_name, str) else "",
+                "agent_id": agent_id,
+            },
         }
         return build_envelope(
             msg_type="res",
@@ -228,7 +280,207 @@ def _make_toolcall_handler(
     return _handle_toolcall
 
 
-def _make_negotiation_handler(tools: list[str]) -> HandlerFn:
+def _make_trustsync_handler(
+    *,
+    tools: list[str],
+    policy_manager: SecurityPolicyManager | None,
+    update_verify_key: str | None,
+) -> HandlerFn:
+    def _handle_trustsync(request: dict[str, Any]) -> dict[str, Any]:
+        payload_any = request.get("payload")
+        payload = payload_any if isinstance(payload_any, dict) else {}
+        op = payload.get("op")
+        op_value = op if isinstance(op, str) else "discover"
+        source_agent = (
+            request.get("from", {}).get("agent_id")
+            if isinstance(request.get("from"), dict)
+            else "did:key:unknown"
+        )
+
+        if op_value == "discover":
+            snapshot = policy_manager.snapshot(include_private=False) if policy_manager is not None else {}
+            registry_hash = (
+                policy_manager.snapshot_hash(include_private=False)
+                if policy_manager is not None
+                else sha256_prefixed(canonical_json_bytes(snapshot))
+            )
+            trust_payload = {
+                "op": "discover",
+                "status": "snapshot",
+                "message": "trust snapshot",
+                "snapshot": snapshot,
+                "registry_hash": registry_hash,
+                "source_agent": source_agent,
+            }
+            return build_envelope(
+                msg_type="res",
+                from_identity=request["to"],
+                to_identity=request["from"],
+                content_type="trustsync.v1",
+                payload=trust_payload,
+                cap=_cap_with_tools(tools),
+                schema=get_builtin_descriptor("trustsync.v1"),
+                trace=derive_response_trace(request.get("trace")),
+            )
+
+        if op_value != "propose":
+            return make_error_response(
+                request=request,
+                code="BAD_REQUEST",
+                message="trustsync.v1 op must be discover or propose",
+                retryable=False,
+            )
+
+        if policy_manager is None:
+            result_payload = {
+                "op": "propose",
+                "status": "rejected",
+                "message": "trust policy manager is not configured",
+                "source_agent": source_agent,
+            }
+            return build_envelope(
+                msg_type="res",
+                from_identity=request["to"],
+                to_identity=request["from"],
+                content_type="trustsync.v1",
+                payload=result_payload,
+                cap=_cap_with_tools(tools),
+                schema=get_builtin_descriptor("trustsync.v1"),
+                trace=derive_response_trace(request.get("trace")),
+            )
+
+        if update_verify_key is None:
+            result_payload = {
+                "op": "propose",
+                "status": "rejected",
+                "message": "trust update verify key is not configured",
+                "source_agent": source_agent,
+            }
+            return build_envelope(
+                msg_type="res",
+                from_identity=request["to"],
+                to_identity=request["from"],
+                content_type="trustsync.v1",
+                payload=result_payload,
+                cap=_cap_with_tools(tools),
+                schema=get_builtin_descriptor("trustsync.v1"),
+                trace=derive_response_trace(request.get("trace")),
+            )
+
+        registry = payload.get("registry")
+        signature = payload.get("signature")
+        merge = bool(payload.get("merge", True))
+        if not isinstance(registry, dict) or not isinstance(signature, str) or not signature:
+            return make_error_response(
+                request=request,
+                code="BAD_REQUEST",
+                message="trustsync.v1 propose requires registry object and signature string",
+                retryable=False,
+            )
+
+        try:
+            verify_detached_json(registry, signature, update_verify_key)
+            registry_hash = policy_manager.apply_registry(registry, merge=merge)
+            snapshot = policy_manager.snapshot(include_private=False)
+            result_payload = {
+                "op": "propose",
+                "status": "accepted",
+                "message": "registry update accepted",
+                "snapshot": snapshot,
+                "registry_hash": registry_hash,
+                "source_agent": source_agent,
+            }
+        except (SecurityError, ValueError) as exc:
+            result_payload = {
+                "op": "propose",
+                "status": "rejected",
+                "message": f"registry update rejected: {exc}",
+                "source_agent": source_agent,
+            }
+        return build_envelope(
+            msg_type="res",
+            from_identity=request["to"],
+            to_identity=request["from"],
+            content_type="trustsync.v1",
+            payload=result_payload,
+            cap=_cap_with_tools(tools),
+            schema=get_builtin_descriptor("trustsync.v1"),
+            trace=derive_response_trace(request.get("trace")),
+        )
+
+    return _handle_trustsync
+
+
+def _make_session_handler(*, tools: list[str], signing_key: str | None) -> HandlerFn:
+    def _handle_session(request: dict[str, Any]) -> dict[str, Any]:
+        payload_any = request.get("payload")
+        payload: dict[str, Any] = payload_any if isinstance(payload_any, dict) else {}
+        op = payload.get("op")
+        op_value = op if isinstance(op, str) else ""
+        profile = payload.get("profile")
+        nonce = payload.get("nonce")
+        expires = payload.get("expires")
+        if not isinstance(profile, dict) or not isinstance(nonce, str) or len(nonce) < 8:
+            return make_error_response(
+                request=request,
+                code="BAD_REQUEST",
+                message="session.v1 requires profile object and nonce string (len >= 8)",
+                retryable=False,
+            )
+
+        if op_value not in {"open", "ack"}:
+            return make_error_response(
+                request=request,
+                code="BAD_REQUEST",
+                message="session.v1 op must be open or ack",
+                retryable=False,
+            )
+
+        exp = expires
+        if not isinstance(exp, str):
+            exp = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10)).replace(microsecond=0).isoformat()
+            exp = exp.replace("+00:00", "Z")
+
+        binding_doc = {
+            "from_agent": request.get("from", {}).get("agent_id")
+            if isinstance(request.get("from"), dict)
+            else "did:key:unknown",
+            "to_agent": request.get("to", {}).get("agent_id")
+            if isinstance(request.get("to"), dict)
+            else "did:key:unknown",
+            "profile": profile,
+            "nonce": nonce,
+            "expires": exp,
+        }
+        binding_id = sha256_prefixed(canonical_json_bytes(binding_doc))
+        response_payload: dict[str, Any] = {
+            "op": "ack",
+            "accepted": True,
+            "profile": profile,
+            "nonce": nonce,
+            "expires": exp,
+            "binding_id": binding_id,
+            "message": "session binding established",
+        }
+        if signing_key is not None:
+            response_payload["binding_alg"] = "ed25519"
+            response_payload["binding_sig"] = sign_detached_json(binding_doc, signing_key)
+
+        return build_envelope(
+            msg_type="res",
+            from_identity=request["to"],
+            to_identity=request["from"],
+            content_type="session.v1",
+            payload=response_payload,
+            cap=_cap_with_tools(tools),
+            schema=get_builtin_descriptor("session.v1"),
+            trace=derive_response_trace(request.get("trace")),
+        )
+
+    return _handle_session
+
+
+def _make_negotiation_handler(tools: list[str], *, session_binding_enabled: bool) -> HandlerFn:
     def _handle_negotiation(request: dict[str, Any]) -> dict[str, Any]:
         negotiation_payload = {
             "need": {},
@@ -237,6 +489,11 @@ def _make_negotiation_handler(tools: list[str]) -> HandlerFn:
             "supported_ct": sorted(SUPPORTED_CONTENT_TYPES),
             "available_tools": tools,
             "versioning": versioning_payload_metadata(),
+            "session_binding": {
+                "supported": session_binding_enabled,
+                "content_type": "session.v1",
+                "alg": "ed25519",
+            },
         }
         return build_envelope(
             msg_type="res",
@@ -257,6 +514,9 @@ def make_default_handler(
     extra_handlers: Mapping[str, HandlerFn] | None = None,
     tool_registry: ToolRegistry | None = None,
     tool_execution_policy: ToolExecutionPolicy | None = None,
+    trust_policy_manager: SecurityPolicyManager | None = None,
+    trust_update_verify_key: str | None = None,
+    session_binding_signing_key: str | None = None,
 ) -> HandlerFn:
     registry = tool_registry or make_default_tool_registry()
     tools = registry.names()
@@ -264,7 +524,19 @@ def make_default_handler(
         {
             "task.v1": _make_task_handler(tools),
             "toolcall.v1": _make_toolcall_handler(registry, tools, execution_policy=tool_execution_policy),
-            "negotiation.v1": _make_negotiation_handler(tools),
+            "negotiation.v1": _make_negotiation_handler(
+                tools,
+                session_binding_enabled=session_binding_signing_key is not None,
+            ),
+            "trustsync.v1": _make_trustsync_handler(
+                tools=tools,
+                policy_manager=trust_policy_manager,
+                update_verify_key=trust_update_verify_key,
+            ),
+            "session.v1": _make_session_handler(
+                tools=tools,
+                signing_key=session_binding_signing_key,
+            ),
         }
     )
 
@@ -278,3 +550,16 @@ def default_handler(request: dict[str, Any]) -> dict[str, Any]:
 
 
 _DEFAULT_HANDLER = make_default_handler()
+
+
+def _extract_authz_scopes(raw: Any) -> set[str]:
+    if not isinstance(raw, dict):
+        return set()
+    scopes = raw.get("scopes")
+    if not isinstance(scopes, list):
+        return set()
+    normalized: set[str] = set()
+    for item in scopes:
+        if isinstance(item, str) and item:
+            normalized.add(item)
+    return normalized

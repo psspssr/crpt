@@ -11,7 +11,9 @@ from a2a_sdl.security import (
     encrypt_payload,
     generate_signing_keypair,
     generate_x25519_keypair,
+    sign_detached_json,
     sign_envelope,
+    verify_detached_json,
     verify_envelope_signature,
 )
 
@@ -24,6 +26,12 @@ class SecurityTests(unittest.TestCase):
         keys = generate_signing_keypair()
         sign_envelope(env, keys["private_key_b64"], kid="did:key:z6M#k1")
         self.assertTrue(verify_envelope_signature(env, keys["public_key_b64"]))
+
+    def test_detached_sign_and_verify_json(self) -> None:
+        payload = {"a": 1, "b": {"x": True}}
+        keys = generate_signing_keypair()
+        sig = sign_detached_json(payload, keys["private_key_b64"])
+        self.assertTrue(verify_detached_json(payload, sig, keys["public_key_b64"]))
 
     def test_signature_tamper_fails(self) -> None:
         env = make_task_envelope()

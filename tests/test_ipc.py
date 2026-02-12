@@ -14,6 +14,7 @@ from a2a_sdl.policy import SecurityPolicy
 from a2a_sdl.replay import ReplayCache
 from a2a_sdl.security import encrypt_payload, generate_signing_keypair, generate_x25519_keypair, sign_envelope
 from a2a_sdl.transport_ipc import IPCServer, decode_ipc_frames, encode_ipc_frame, send_ipc
+from a2a_sdl.versioning import parse_runtime_version_policy
 
 from tests.test_helpers import make_task_envelope
 
@@ -146,6 +147,24 @@ class IPCTransportTests(unittest.TestCase):
 
             res = send_ipc("127.0.0.1", port, req, encoding="json")
             self.assertEqual(res["ct"], "state.v1")
+        finally:
+            server.shutdown()
+            thread.join(timeout=1)
+
+    def test_ipc_runtime_version_policy_deprecates_content_type(self) -> None:
+        version_policy = parse_runtime_version_policy(
+            {"deprecated_content_types": {"task.v1": "2000-01-01T00:00:00Z"}}
+        )
+        server = IPCServer("127.0.0.1", 0, handler=default_handler, version_policy=version_policy)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        time.sleep(0.05)
+
+        try:
+            port = server._server.server_address[1]
+            res = send_ipc("127.0.0.1", port, make_task_envelope(), encoding="json")
+            self.assertEqual(res["ct"], "error.v1")
+            self.assertIn("deprecated", res["payload"]["message"])
         finally:
             server.shutdown()
             thread.join(timeout=1)

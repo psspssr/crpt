@@ -23,6 +23,7 @@ from .schema import (
 )
 from .utils import canonical_json_bytes, ensure_iso_utc, new_message_id, now_iso_utc, sha256_prefixed
 from .versioning import enforce_capability_version_compatibility
+from .versioning import RuntimeVersionPolicy, enforce_content_type_version_policy
 
 
 class EnvelopeValidationError(ValueError):
@@ -101,6 +102,7 @@ def validate_envelope(
     limits: dict[str, int] | None = None,
     validate_payload_schema: bool = True,
     allow_schema_uri: bool = True,
+    version_policy: RuntimeVersionPolicy | None = None,
 ) -> None:
     if not isinstance(envelope, dict):
         raise EnvelopeValidationError("envelope must be an object")
@@ -129,7 +131,11 @@ def validate_envelope(
     if not isinstance(envelope["cap"], dict):
         raise EnvelopeValidationError("cap must be an object")
     try:
-        enforce_capability_version_compatibility(envelope["cap"], local_version=PROTOCOL_VERSION)
+        enforce_capability_version_compatibility(
+            envelope["cap"],
+            local_version=PROTOCOL_VERSION,
+            runtime_policy=version_policy,
+        )
     except ValueError as exc:
         raise EnvelopeValidationError(str(exc)) from exc
 
@@ -138,6 +144,10 @@ def validate_envelope(
         raise EnvelopeValidationError("ct must be a string")
     if ct not in SUPPORTED_CONTENT_TYPES:
         raise EnvelopeValidationError(f"unsupported ct: {ct}")
+    try:
+        enforce_content_type_version_policy(ct, runtime_policy=version_policy)
+    except ValueError as exc:
+        raise EnvelopeValidationError(str(exc)) from exc
 
     try:
         validate_schema_descriptor(envelope["schema"])

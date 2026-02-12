@@ -12,6 +12,7 @@ from .envelope import validate_envelope
 from .policy import SecurityPolicy
 from .replay import ReplayCache, ReplayCacheProtocol
 from .transport_ws import process_ws_payload
+from .versioning import RuntimeVersionPolicy
 
 
 MessageHandler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -61,8 +62,9 @@ def send_ipc(
     *,
     encoding: str = "json",
     timeout: float = 10.0,
+    version_policy: RuntimeVersionPolicy | None = None,
 ) -> dict[str, Any]:
-    validate_envelope(envelope, allow_schema_uri=False)
+    validate_envelope(envelope, allow_schema_uri=False, version_policy=version_policy)
     payload = encode_bytes(envelope, encoding=encoding)
 
     with socket.create_connection((host, port), timeout=timeout) as conn:
@@ -70,7 +72,7 @@ def send_ipc(
         response_payload = _read_frame(conn, timeout=timeout)
 
     decoded = decode_bytes(response_payload, encoding=encoding)
-    validate_envelope(decoded, allow_schema_uri=False)
+    validate_envelope(decoded, allow_schema_uri=False, version_policy=version_policy)
     return decoded
 
 
@@ -87,6 +89,7 @@ class IPCServer:
         replay_cache: ReplayCacheProtocol | None = None,
         enforce_replay: bool = False,
         security_policy: SecurityPolicy | None = None,
+        version_policy: RuntimeVersionPolicy | None = None,
     ) -> None:
         self.host = host
         self.port = port
@@ -94,6 +97,7 @@ class IPCServer:
         self.encoding = encoding
         self.enforce_replay = enforce_replay
         self.security_policy = security_policy
+        self.version_policy = version_policy
 
         needs_replay = enforce_replay or bool(security_policy and security_policy.require_replay)
         self.replay_cache = replay_cache or (ReplayCache() if needs_replay else None)
@@ -105,6 +109,7 @@ class IPCServer:
         enforce_replay = self.enforce_replay
         security_policy = self.security_policy
         replay_cache = self.replay_cache
+        version_policy = self.version_policy
 
         class RequestHandler(BaseRequestHandler):
             def handle(self) -> None:
@@ -128,6 +133,7 @@ class IPCServer:
                             enforce_replay=enforce_replay,
                             replay_cache=replay_cache,
                             security_policy=security_policy,
+                            version_policy=version_policy,
                         )
                         try:
                             self.request.sendall(encode_ipc_frame(response))

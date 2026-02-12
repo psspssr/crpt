@@ -20,13 +20,15 @@ cbor = ["cbor2>=5.6.5"]
 schema = ["jsonschema>=4.23.0"]
 http = ["fastapi>=0.115.0", "uvicorn>=0.30.0", "httpx>=0.27.0"]
 ws = ["websockets>=12.0"]
+redis = ["redis>=5.0.0"]
 full = [
   "cbor2>=5.6.5",
   "jsonschema>=4.23.0",
   "fastapi>=0.115.0",
   "uvicorn>=0.30.0",
   "httpx>=0.27.0",
-  "websockets>=12.0"
+  "websockets>=12.0",
+  "redis>=5.0.0"
 ]
 dev = [
   "ruff>=0.9.0",

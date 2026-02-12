@@ -30,11 +30,18 @@ This repository implements:
 - Plugin safety controls: deny-by-default tool execution and strict custom handler module/manifest validation
 - Stress and fuzz testing for malformed envelopes and concurrent HTTP load
 - Durable replay protection via optional SQLite-backed nonce cache (`--replay-db-file`)
+- Distributed replay protection via optional Redis backend (`--replay-redis-url`)
 - Production transport controls: TLS/mTLS options and production deployment profile
+- Outbound HTTPS client mTLS controls for `a2a send` (`--tls-ca-file`, client cert/key options)
 - Admission control with concurrency + token-bucket rate limiting
 - Optional admin observability endpoints (`/healthz`, `/readyz`, `/metrics`) with Prometheus-compatible metrics output
 - Audit signature verification support for signed audit chains
+- Optional external audit hash anchoring (`--audit-anchor-url`) with fail-open/fail-closed modes
 - Runtime capability-version enforcement (`cap.a2a_sdl.v`) for peer compatibility checks
+- Runtime migration/deprecation policy enforcement via `--version-policy-file`
+- Dynamic trust lifecycle protocol (`trustsync.v1`) with signed registry update proposals
+- Negotiated session binding handshake (`session.v1`) with optional detached Ed25519 binding signature
+- Fine-grained tool authorization (per-agent grants and required scopes via `--tool-policy-file`)
 
 ## How It Works
 
@@ -113,6 +120,7 @@ Useful extras:
 - `a2a-sdl[schema]` for JSON Schema validation
 - `a2a-sdl[http]` for FastAPI/uvicorn adapter
 - `a2a-sdl[ws]` for websocket transport
+- `a2a-sdl[redis]` for distributed replay cache backend
 
 ## Quick Start
 
@@ -194,6 +202,29 @@ a2a serve \
   --admission-burst 800
 ```
 
+Distributed replay on Redis:
+
+```bash
+a2a serve \
+  --deployment-mode prod \
+  --tls-cert-file /etc/a2a/tls/server.crt \
+  --tls-key-file /etc/a2a/tls/server.key \
+  --replay-redis-url redis://redis.internal:6379/0 \
+  --replay-redis-prefix a2a:replay:prod
+```
+
+Sender-side HTTPS + mTLS:
+
+```bash
+a2a send \
+  --url https://a2a.example.com/a2a \
+  --ct task.v1 \
+  --payload-file a2a_sdl/examples/task_min_payload.json \
+  --tls-ca-file /etc/a2a/tls/ca.crt \
+  --tls-client-cert-file /etc/a2a/tls/client.crt \
+  --tls-client-key-file /etc/a2a/tls/client.key
+```
+
 Operational observability endpoints:
 
 ```bash
@@ -221,7 +252,7 @@ Two extensibility layers are built in:
   - `sys.ping`: liveness + echo payload
   - `math.add`: numeric aggregation from `args.values`
 - **Content-type router**:
-  - default implementation for `task.v1`, `toolcall.v1`, `negotiation.v1`
+  - default implementation for `task.v1`, `toolcall.v1`, `negotiation.v1`, `trustsync.v1`, `session.v1`
   - custom content types can be registered at server startup
 
 Protocol metadata improvement:
@@ -246,6 +277,23 @@ Allow tools explicitly:
 a2a serve --allow-tool sys.ping --allow-tool math.add
 ```
 
+Fine-grained tool authorization policy file:
+
+```json
+{
+  "allowed_tools_by_agent": {
+    "did:key:planner-a": ["math.add", "sys.ping"]
+  },
+  "required_scopes_by_tool": {
+    "math.add": "tool:math.add"
+  }
+}
+```
+
+```bash
+a2a serve --tool-policy-file tool_policy.json
+```
+
 Use `--unsafe-allow-unmanifested-handlers` only for trusted local development.
 
 ## Security Model
@@ -262,9 +310,24 @@ Use `--unsafe-allow-unmanifested-handlers` only for trusted local development.
 - requires durable replay storage (`--replay-db-file`) unless overridden
 
 Operational components:
-- `ReplayCache` (memory) or `SQLiteReplayCache` (durable) blocks duplicate nonce usage.
-- Audit chain persists tamper-evident events and can verify Ed25519 signatures over entries.
+- `ReplayCache` (memory), `SQLiteReplayCache` (durable), or `RedisReplayCache` (distributed) blocks duplicate nonce usage.
+- Audit chain persists tamper-evident events, can verify Ed25519 signatures over entries, and can anchor entry hashes to external HTTP(S) sinks.
 - Structured errors intentionally avoid leaking sensitive internals.
+
+Trust lifecycle sync:
+
+- `trustsync.v1` supports `discover` snapshots and signed `propose` registry updates.
+- Configure update verification key with `--trust-sync-verify-key-file`.
+
+Session binding handshake:
+
+- `session.v1` establishes a negotiated binding ID over profile+nonce(+expiry).
+- Configure detached signature on binding acknowledgements with `--session-binding-signing-key-file`.
+
+Runtime migration/deprecation policy:
+
+- Load with `--version-policy-file`.
+- Supports min/max peer protocol bounds, required peer version presence, deprecation deadlines, and allowed content-type version ranges.
 
 Programmatic local IPC usage:
 

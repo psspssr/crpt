@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,6 +11,7 @@ from .envelope import EnvelopeValidationError
 from .replay import ReplayCacheProtocol
 from .schema import SchemaValidationError, validate_payload
 from .security import SecurityError, decrypt_payload, verify_envelope_signature
+from .utils import canonical_json_bytes, now_iso_utc, sha256_prefixed
 
 
 @dataclass(slots=True)
@@ -25,6 +27,59 @@ class SecurityPolicy:
     revoked_kids: set[str] = field(default_factory=set)
     kid_not_after: dict[str, str] = field(default_factory=dict)
     decrypt_private_keys: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class SecurityPolicyManager:
+    """Thread-safe mutable registry view for dynamic trust sync."""
+
+    policy: SecurityPolicy
+    _updated_at: str = field(default_factory=now_iso_utc, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    def snapshot(self, *, include_private: bool = False) -> dict[str, Any]:
+        with self._lock:
+            data: dict[str, Any] = {
+                "trusted_signing_keys": dict(sorted(self.policy.trusted_signing_keys.items())),
+                "required_kid_by_agent": dict(sorted(self.policy.required_kid_by_agent.items())),
+                "allowed_kids_by_agent": {
+                    key: sorted(values) for key, values in sorted(self.policy.allowed_kids_by_agent.items())
+                },
+                "revoked_kids": sorted(self.policy.revoked_kids),
+                "kid_not_after": dict(sorted(self.policy.kid_not_after.items())),
+                "updated_at": self._updated_at,
+            }
+            if include_private:
+                data["decrypt_private_keys"] = dict(sorted(self.policy.decrypt_private_keys.items()))
+            return data
+
+    def snapshot_hash(self, *, include_private: bool = False) -> str:
+        snap = self.snapshot(include_private=include_private)
+        return sha256_prefixed(canonical_json_bytes(snap))
+
+    def apply_registry(self, registry: dict[str, Any], *, merge: bool = True) -> str:
+        normalized = _normalize_registry_payload(registry)
+        with self._lock:
+            if merge:
+                self.policy.trusted_signing_keys.update(normalized["trusted_signing_keys"])
+                self.policy.required_kid_by_agent.update(normalized["required_kid_by_agent"])
+                for agent_id, kids in normalized["allowed_kids_by_agent"].items():
+                    existing = self.policy.allowed_kids_by_agent.get(agent_id, set())
+                    self.policy.allowed_kids_by_agent[agent_id] = set(existing) | set(kids)
+                self.policy.revoked_kids.update(normalized["revoked_kids"])
+                self.policy.kid_not_after.update(normalized["kid_not_after"])
+                self.policy.decrypt_private_keys.update(normalized["decrypt_private_keys"])
+            else:
+                self.policy.trusted_signing_keys = dict(normalized["trusted_signing_keys"])
+                self.policy.required_kid_by_agent = dict(normalized["required_kid_by_agent"])
+                self.policy.allowed_kids_by_agent = {
+                    key: set(values) for key, values in normalized["allowed_kids_by_agent"].items()
+                }
+                self.policy.revoked_kids = set(normalized["revoked_kids"])
+                self.policy.kid_not_after = dict(normalized["kid_not_after"])
+                self.policy.decrypt_private_keys = dict(normalized["decrypt_private_keys"])
+            self._updated_at = now_iso_utc()
+        return self.snapshot_hash(include_private=False)
 
 
 
@@ -165,3 +220,75 @@ def _parse_iso_utc(value: str) -> dt.datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=dt.timezone.utc)
     return parsed.astimezone(dt.timezone.utc)
+
+
+def _normalize_registry_payload(registry: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(registry, dict):
+        raise ValueError("registry must be an object")
+
+    trusted = _normalize_str_map(registry.get("trusted_signing_keys"), "trusted_signing_keys")
+    required = _normalize_str_map(registry.get("required_kid_by_agent"), "required_kid_by_agent")
+    kid_not_after = _normalize_str_map(registry.get("kid_not_after"), "kid_not_after")
+    decrypt = _normalize_str_map(registry.get("decrypt_private_keys"), "decrypt_private_keys")
+    allowed = _normalize_str_map_of_sets(registry.get("allowed_kids_by_agent"), "allowed_kids_by_agent")
+    revoked = _normalize_str_set(registry.get("revoked_kids"), "revoked_kids")
+
+    for kid, raw in kid_not_after.items():
+        _parse_iso_utc(raw)
+
+    return {
+        "trusted_signing_keys": trusted,
+        "required_kid_by_agent": required,
+        "allowed_kids_by_agent": allowed,
+        "revoked_kids": revoked,
+        "kid_not_after": kid_not_after,
+        "decrypt_private_keys": decrypt,
+    }
+
+
+def _normalize_str_map(raw: Any, field_name: str) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{field_name} must be an object")
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key:
+            raise ValueError(f"{field_name} keys must be non-empty strings")
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{field_name}.{key} must be a non-empty string")
+        out[key] = value
+    return out
+
+
+def _normalize_str_map_of_sets(raw: Any, field_name: str) -> dict[str, set[str]]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{field_name} must be an object")
+    out: dict[str, set[str]] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key:
+            raise ValueError(f"{field_name} keys must be non-empty strings")
+        if not isinstance(value, list):
+            raise ValueError(f"{field_name}.{key} must be a list")
+        normalized: set[str] = set()
+        for item in value:
+            if not isinstance(item, str) or not item:
+                raise ValueError(f"{field_name}.{key} entries must be non-empty strings")
+            normalized.add(item)
+        out[key] = normalized
+    return out
+
+
+def _normalize_str_set(raw: Any, field_name: str) -> set[str]:
+    if raw is None:
+        return set()
+    if not isinstance(raw, list):
+        raise ValueError(f"{field_name} must be a list")
+    out: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str) or not item:
+            raise ValueError(f"{field_name} entries must be non-empty strings")
+        out.add(item)
+    return out
