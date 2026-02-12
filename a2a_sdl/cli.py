@@ -372,20 +372,26 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         burst=max(1, int(args.admission_burst)),
     )
 
-    server = A2AHTTPServer(
-        args.host,
-        args.port,
-        handler=handler,
-        replay_cache=replay_cache,
-        enforce_replay=effective_replay_protection,
-        security_policy=security_policy,
-        audit_chain=audit_chain,
-        tls_certfile=args.tls_cert_file,
-        tls_keyfile=args.tls_key_file,
-        tls_ca_file=args.tls_ca_file,
-        tls_require_client_cert=args.tls_require_client_cert,
-        admission_controller=admission_controller,
-    )
+    try:
+        server = A2AHTTPServer(
+            args.host,
+            args.port,
+            handler=handler,
+            replay_cache=replay_cache,
+            enforce_replay=effective_replay_protection,
+            security_policy=security_policy,
+            audit_chain=audit_chain,
+            tls_certfile=args.tls_cert_file,
+            tls_keyfile=args.tls_key_file,
+            tls_ca_file=args.tls_ca_file,
+            tls_require_client_cert=args.tls_require_client_cert,
+            admission_controller=admission_controller,
+        )
+    except Exception as exc:
+        if isinstance(replay_cache, SQLiteReplayCache):
+            replay_cache.close()
+        print(f"failed to initialize server: {exc}", file=sys.stderr)
+        return 2
     scheme = "https" if args.tls_cert_file and args.tls_key_file else "http"
     print(f"serving on {scheme}://{args.host}:{args.port}/a2a")
     try:
