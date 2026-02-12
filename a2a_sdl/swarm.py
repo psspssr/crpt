@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
-import subprocess
+import subprocess  # nosec B404
 import tempfile
 import textwrap
 import threading
@@ -54,40 +55,47 @@ class CodexBackend:
             cmd.extend(["--model", self.model])
 
         try:
-            proc = subprocess.run(
-                cmd,
-                input=prompt,
-                text=True,
-                capture_output=True,
-                timeout=self.timeout_s,
-                check=False,
-            )
-        except Exception as exc:
-            return json.dumps(
-                {
-                    "status": "working",
-                    "summary": f"backend execution exception: {exc}",
-                    "handoff": "Continue iterating toward near_final status.",
-                }
-            )
+            try:
+                # Command vector is static and executed with shell=False.
+                proc = subprocess.run(
+                    cmd,
+                    input=prompt,
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout_s,
+                    check=False,
+                )  # nosec B603
+            except Exception as exc:
+                return json.dumps(
+                    {
+                        "status": "working",
+                        "summary": f"backend execution exception: {exc}",
+                        "handoff": "Continue iterating toward near_final status.",
+                    }
+                )
 
-        try:
-            with open(out_path, "r", encoding="utf-8") as f:
-                result = f.read().strip()
-        except Exception:
-            result = ""
+            try:
+                with open(out_path, "r", encoding="utf-8") as f:
+                    result = f.read().strip()
+            except Exception:
+                result = ""
 
-        if proc.returncode != 0 and not result:
-            err = proc.stderr.strip() or proc.stdout.strip() or "codex exec failure"
-            return json.dumps(
-                {
-                    "status": "working",
-                    "summary": f"backend returned error: {err[:500]}",
-                    "handoff": "Continue iterating toward near_final status.",
-                }
-            )
+            if proc.returncode != 0 and not result:
+                err = proc.stderr.strip() or proc.stdout.strip() or "codex exec failure"
+                return json.dumps(
+                    {
+                        "status": "working",
+                        "summary": f"backend returned error: {err[:500]}",
+                        "handoff": "Continue iterating toward near_final status.",
+                    }
+                )
 
-        return result or proc.stdout.strip() or ""
+            return result or proc.stdout.strip() or ""
+        finally:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
 
 
 @dataclass(slots=True)
@@ -343,7 +351,7 @@ def _parse_buddy_output(raw: str) -> dict[str, str]:
                 decoded = json.loads(extracted)
                 return _normalize_buddy_reply(decoded)
             except Exception:
-                pass
+                extracted = None
         return {
             "status": _infer_status_from_text(text),
             "summary": _infer_summary_from_text(text),

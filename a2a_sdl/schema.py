@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import socket
 import urllib.request
+from urllib.parse import urlparse
 from typing import Any, Callable
 
 from .utils import canonical_json_bytes, sha256_prefixed
@@ -177,12 +180,66 @@ def validate_schema_descriptor(descriptor: dict[str, Any]) -> None:
 
 
 def _default_fetcher(uri: str) -> dict[str, Any]:
-    with urllib.request.urlopen(uri, timeout=5) as response:
+    parsed = urlparse(uri)
+    if parsed.scheme not in {"https", "http"}:
+        raise SchemaValidationError("schema.uri scheme must be http or https")
+    if parsed.username or parsed.password:
+        raise SchemaValidationError("schema.uri must not include credentials")
+    host = parsed.hostname
+    if not host:
+        raise SchemaValidationError("schema.uri must include a host")
+    if _host_is_local_or_private(host):
+        raise SchemaValidationError("schema.uri host must resolve to public addresses")
+
+    # Host/scheme are validated above before making a network fetch.
+    with urllib.request.urlopen(uri, timeout=5) as response:  # nosec B310
         data = response.read()
     decoded = json.loads(data.decode("utf-8"))
     if not isinstance(decoded, dict):
         raise SchemaValidationError("fetched schema must be a JSON object")
     return decoded
+
+
+def _host_is_local_or_private(host: str) -> bool:
+    lowered = host.lower()
+    if lowered == "localhost" or lowered.endswith(".local"):
+        return True
+
+    try:
+        direct_ip = ipaddress.ip_address(lowered)
+    except ValueError:
+        direct_ip = None
+    if direct_ip is not None:
+        return _ip_is_local_or_private(direct_ip)
+
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise SchemaValidationError(f"schema.uri host resolution failed: {host}") from exc
+
+    for info in infos:
+        sockaddr = info[4]
+        if not isinstance(sockaddr, tuple) or not sockaddr:
+            continue
+        raw_ip = sockaddr[0]
+        try:
+            resolved_ip = ipaddress.ip_address(raw_ip)
+        except ValueError:
+            continue
+        if _ip_is_local_or_private(resolved_ip):
+            return True
+    return False
+
+
+def _ip_is_local_or_private(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
 
 
 def resolve_schema(descriptor: dict[str, Any], fetcher: Fetcher | None = None) -> dict[str, Any]:

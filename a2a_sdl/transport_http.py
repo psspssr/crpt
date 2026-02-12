@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
@@ -510,6 +511,7 @@ def send_http(
     retry_attempts: int = 0,
     retry_backoff_s: float = 0.0,
 ) -> dict[str, Any]:
+    _validate_http_url(url)
     validate_envelope(envelope, allow_schema_uri=False)
     payload = encode_bytes(envelope, encoding=encoding)
 
@@ -528,7 +530,8 @@ def send_http(
 
     for attempt in range(attempts + 1):
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            # URL scheme/host are validated via _validate_http_url.
+            with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
                 body = response.read()
                 response_content_type = response.headers.get("Content-Type")
             break
@@ -616,6 +619,14 @@ def send_http_with_auto_downgrade(
         )
 
     return first_response
+
+
+def _validate_http_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("url scheme must be http or https")
+    if not parsed.netloc:
+        raise ValueError("url must include host and optional port")
 
 
 def create_fastapi_app(handler: MessageHandler):

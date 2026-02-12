@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from a2a_sdl.swarm import (
     BuddyEndpoint,
+    CodexBackend,
     CodexBuddyServer,
     SwarmCoordinator,
     _normalize_buddy_reply,
@@ -28,6 +32,33 @@ class _FakeBackend:
 
 
 class SwarmTests(unittest.TestCase):
+    def test_codex_backend_deletes_temp_output_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "buddy-output.txt")
+
+            class _TmpFile:
+                def __enter__(self):
+                    with open(out_path, "w", encoding="utf-8"):
+                        pass
+                    self.name = out_path
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            def fake_run(*args, **kwargs):
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write("ok")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            backend = CodexBackend(workdir=".", timeout_s=1)
+            with mock.patch("a2a_sdl.swarm.tempfile.NamedTemporaryFile", return_value=_TmpFile()):
+                with mock.patch("a2a_sdl.swarm.subprocess.run", side_effect=fake_run):
+                    result = backend.run("hello")
+
+            self.assertEqual(result, "ok")
+            self.assertFalse(os.path.exists(out_path))
+
     def test_normalize_buddy_reply_defaults(self) -> None:
         reply = _normalize_buddy_reply({"status": "bad", "summary": "", "handoff": ""})
         self.assertEqual(reply["status"], "working")

@@ -236,17 +236,10 @@ def decrypt_payload(
         if kid is not None and entry_kid != kid:
             continue
 
-        try:
-            eph_public_raw = b64url_decode(_expect_str(entry, "eph"))
-            wrapped_key = b64url_decode(_expect_str(entry, "ek"))
-            wrap_nonce = b64url_decode(_expect_str(entry, "wn"))
-            eph_public = X25519PublicKey.from_public_bytes(eph_public_raw)
-            shared = recipient_key.exchange(eph_public)
-            wrap_key = _derive_key(shared, b"a2a-sdl-key-wrap-v1")
-            encrypted_key = ChaCha20Poly1305(wrap_key).decrypt(wrap_nonce, wrapped_key, None)
+        candidate = _try_unwrap_entry(entry, recipient_key)
+        if candidate is not None:
+            encrypted_key = candidate
             break
-        except Exception:
-            continue
 
     if encrypted_key is None:
         raise SecurityError("unable to unwrap content key for recipient")
@@ -284,6 +277,19 @@ def _derive_key(shared_secret: bytes, info: bytes) -> bytes:
         info=info,
     )
     return hkdf.derive(shared_secret)
+
+
+def _try_unwrap_entry(entry: dict[str, Any], recipient_key: X25519PrivateKey) -> bytes | None:
+    try:
+        eph_public_raw = b64url_decode(_expect_str(entry, "eph"))
+        wrapped_key = b64url_decode(_expect_str(entry, "ek"))
+        wrap_nonce = b64url_decode(_expect_str(entry, "wn"))
+        eph_public = X25519PublicKey.from_public_bytes(eph_public_raw)
+        shared = recipient_key.exchange(eph_public)
+        wrap_key = _derive_key(shared, b"a2a-sdl-key-wrap-v1")
+        return ChaCha20Poly1305(wrap_key).decrypt(wrap_nonce, wrapped_key, None)
+    except Exception:
+        return None
 
 
 def _load_ed25519_private_key(value: str | bytes | Ed25519PrivateKey) -> Ed25519PrivateKey:

@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     validate_cmd.set_defaults(func=_cmd_validate)
 
     serve = subparsers.add_parser("serve", help="Run local HTTP A2A server")
-    serve.add_argument("--host", default="0.0.0.0")
+    serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8080)
     serve.add_argument(
         "--deployment-mode",
@@ -544,7 +544,8 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
 def _load_payload(payload_file: str | None, payload_json: str | None) -> Any:
     if payload_file:
         return json.loads(pathlib.Path(payload_file).read_text(encoding="utf-8"))
-    assert payload_json is not None
+    if payload_json is None:
+        raise ValueError("payload_json is required when payload_file is not provided")
     return json.loads(payload_json)
 
 

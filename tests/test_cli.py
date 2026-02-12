@@ -6,12 +6,16 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from a2a_sdl.cli import _load_handler_spec, _load_key_registry, main
+from a2a_sdl.cli import _load_handler_spec, _load_key_registry, _load_payload, main
 from a2a_sdl.envelope import build_envelope
 from a2a_sdl.schema import get_builtin_descriptor
 
 
 class CLITests(unittest.TestCase):
+    def test_load_payload_requires_one_input(self) -> None:
+        with self.assertRaises(ValueError):
+            _load_payload(None, None)
+
     def test_send_passes_timeout_and_retry_options(self) -> None:
         captured: dict[str, object] = {}
 
