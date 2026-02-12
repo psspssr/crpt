@@ -86,7 +86,7 @@ Tests:
 Recommended (isolated CLI install with `uv`):
 
 ```bash
-uv tool install "a2a-sdl[full]"
+uv tool install "a2acrpt[full]"
 uv tool update-shell
 ```
 
@@ -105,22 +105,22 @@ uv tool install "git+https://github.com/psspssr/crpt.git"
 One-off command execution without permanent install:
 
 ```bash
-uv tool run --from "a2a-sdl[full]" a2a --help
+uv tool run --from "a2acrpt[full]" a2a --help
 ```
 
 Alternative installers:
 
 ```bash
-pip install "a2a-sdl[full]"
-pipx install "a2a-sdl[full]"
+pip install "a2acrpt[full]"
+pipx install "a2acrpt[full]"
 ```
 
 Useful extras:
-- `a2a-sdl[cbor]` for CBOR codec support
-- `a2a-sdl[schema]` for JSON Schema validation
-- `a2a-sdl[http]` for FastAPI/uvicorn adapter
-- `a2a-sdl[ws]` for websocket transport
-- `a2a-sdl[redis]` for distributed replay cache backend
+- `a2acrpt[cbor]` for CBOR codec support
+- `a2acrpt[schema]` for JSON Schema validation
+- `a2acrpt[http]` for FastAPI/uvicorn adapter
+- `a2acrpt[ws]` for websocket transport
+- `a2acrpt[redis]` for distributed replay cache backend
 
 ## Quick Start
 
@@ -372,7 +372,7 @@ python3 -m unittest discover -s tests -v
 ## Release (Maintainers)
 
 One-time setup:
-1. Create a PyPI project named `a2a-sdl`.
+1. Create a PyPI project named `a2acrpt`.
 2. In PyPI, add a Trusted Publisher for this GitHub repo/workflow.
 3. In GitHub repo settings, create environment `pypi` (optional protection rules).
 
