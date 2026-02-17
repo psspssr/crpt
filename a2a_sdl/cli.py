@@ -14,7 +14,9 @@ from .audit import AuditChain, HTTPAuditAnchor
 from .codec import decode_bytes
 from .conformance import render_conformance_json, render_conformance_text, run_conformance_suite
 from .envelope import build_envelope, validate_envelope
+from .gateway import GatewayConfig, make_gateway_handler
 from .handlers import HandlerFn, ToolExecutionPolicy, TrustGovernancePolicy, make_default_handler
+from .orchestrator import execute_workflow_plan, render_workflow_text
 from .policy import SecurityPolicy, SecurityPolicyManager
 from .schema import get_builtin_descriptor
 from .security import (
@@ -331,6 +333,69 @@ def main(argv: list[str] | None = None) -> int:
         help="Output format.",
     )
     conformance.set_defaults(func=_cmd_conformance)
+
+    gateway = subparsers.add_parser("gateway", help="Run session-aware edge gateway that forwards to an upstream A2A endpoint")
+    gateway.add_argument("--host", default="127.0.0.1")
+    gateway.add_argument("--port", type=int, default=8081)
+    gateway.add_argument("--upstream-url", required=True, help="Upstream A2A URL (for example https://agent.internal/a2a)")
+    gateway.add_argument(
+        "--deployment-mode",
+        choices=["prod", "dev"],
+        default="prod",
+        help="prod requires TLS unless --allow-insecure-http is set",
+    )
+    gateway.add_argument(
+        "--allow-insecure-http",
+        action="store_true",
+        help="Allow plaintext HTTP listener (local dev only).",
+    )
+    gateway.add_argument("--tls-cert-file", help="TLS server certificate chain file (PEM)")
+    gateway.add_argument("--tls-key-file", help="TLS server private key file (PEM)")
+    gateway.add_argument("--tls-ca-file", help="TLS CA bundle for optional/required client cert validation")
+    gateway.add_argument("--tls-require-client-cert", action="store_true", help="Require mutual TLS client certs")
+    gateway.add_argument(
+        "--trusted-signing-keys-file",
+        required=True,
+        help="JSON object mapping sec.kid -> Ed25519 public key (PEM or b64)",
+    )
+    gateway.add_argument(
+        "--decrypt-keys-file",
+        required=True,
+        help="JSON object mapping recipient kid -> X25519 private key (PEM or b64)",
+    )
+    gateway.add_argument(
+        "--agent-kid-map-file",
+        help="JSON object mapping from.agent_id -> required sec.kid",
+    )
+    gateway.add_argument(
+        "--session-binding-signing-key-file",
+        help="Optional Ed25519 private key used to sign local session.v1 acknowledgements",
+    )
+    gateway.add_argument(
+        "--session-binding-exempt-ct",
+        action="append",
+        default=[],
+        help="Additional content types exempt from sec.session binding checks (repeatable).",
+    )
+    gateway.add_argument("--replay-ttl", type=int, default=600, help="Replay nonce TTL in seconds")
+    gateway.add_argument("--replay-max-entries", type=int, default=10000, help="Replay cache max entries")
+    gateway.add_argument("--replay-db-file", help="SQLite file for durable replay nonce storage")
+    gateway.add_argument("--replay-redis-url", help="Redis URL for distributed replay cache")
+    gateway.add_argument("--replay-redis-prefix", default="a2a:replay", help="Redis key prefix for replay entries")
+    gateway.add_argument("--upstream-timeout", type=float, default=10.0, help="Forwarding timeout in seconds")
+    gateway.add_argument("--upstream-retry-attempts", type=int, default=1, help="Forwarding retry attempts")
+    gateway.add_argument("--upstream-retry-backoff-s", type=float, default=0.05, help="Forwarding backoff base seconds")
+    gateway.set_defaults(func=_cmd_gateway)
+
+    workflow = subparsers.add_parser("workflow", help="Execute a DAG workflow plan over A2A HTTP endpoints")
+    workflow.add_argument("--plan-file", required=True, help="Workflow plan JSON path")
+    workflow.add_argument("--default-url", help="Default A2A URL for steps that omit url")
+    workflow.add_argument("--timeout", type=float, default=10.0, help="Default per-step timeout seconds")
+    workflow.add_argument("--retry-attempts", type=int, default=1, help="Default per-step retry attempts")
+    workflow.add_argument("--retry-backoff-s", type=float, default=0.05, help="Default per-step backoff base seconds")
+    workflow.add_argument("--no-fail-fast", action="store_true", help="Continue scheduling independent steps after failures")
+    workflow.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    workflow.set_defaults(func=_cmd_workflow)
 
     args = parser.parse_args(argv)
     return args.func(args)
@@ -791,6 +856,141 @@ def _cmd_conformance(args: argparse.Namespace) -> int:
     else:
         print(render_conformance_text(report))
     return 0 if bool(report.get("passed")) else 1
+
+
+def _cmd_gateway(args: argparse.Namespace) -> int:
+    prod_mode = args.deployment_mode == "prod"
+    if prod_mode and not args.allow_insecure_http and (not args.tls_cert_file or not args.tls_key_file):
+        print(
+            "gateway prod mode requires TLS; provide --tls-cert-file and --tls-key-file "
+            "or use --allow-insecure-http for local-only testing",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        trusted_signing_keys = _load_json_map(args.trusted_signing_keys_file)
+        decrypt_private_keys = _load_json_map(args.decrypt_keys_file)
+        required_kid_by_agent = _load_json_map(args.agent_kid_map_file) if args.agent_kid_map_file else {}
+    except Exception as exc:
+        print(f"failed to load gateway key material: {exc}", file=sys.stderr)
+        return 2
+
+    if not trusted_signing_keys:
+        print("gateway requires at least one trusted signing key", file=sys.stderr)
+        return 2
+    if not decrypt_private_keys:
+        print("gateway requires at least one decrypt private key", file=sys.stderr)
+        return 2
+
+    session_binding_signing_key = None
+    if args.session_binding_signing_key_file:
+        try:
+            session_binding_signing_key = _load_key_material(args.session_binding_signing_key_file)
+        except Exception as exc:
+            print(f"failed to load session binding signing key: {exc}", file=sys.stderr)
+            return 2
+
+    session_binding_store = SessionBindingStore(max_entries=max(1, int(args.replay_max_entries)))
+    exempt_ct = set(args.session_binding_exempt_ct)
+    exempt_ct.update({"session.v1", "negotiation.v1", "error.v1"})
+    security_policy = SecurityPolicy(
+        require_mode="enc+sig",
+        require_replay=True,
+        trusted_signing_keys=trusted_signing_keys,
+        required_kid_by_agent=required_kid_by_agent,
+        decrypt_private_keys=decrypt_private_keys,
+        require_session_binding=True,
+        session_binding_store=session_binding_store,
+        session_binding_exempt_ct=exempt_ct,
+    )
+
+    replay_cache: ReplayCache | SQLiteReplayCache | RedisReplayCache | None = None
+    try:
+        if args.replay_redis_url:
+            replay_cache = RedisReplayCache(
+                args.replay_redis_url,
+                key_prefix=args.replay_redis_prefix,
+                ttl_seconds=args.replay_ttl,
+            )
+        elif args.replay_db_file:
+            replay_cache = SQLiteReplayCache(
+                args.replay_db_file,
+                max_entries=args.replay_max_entries,
+                ttl_seconds=args.replay_ttl,
+            )
+        else:
+            replay_cache = ReplayCache(max_entries=args.replay_max_entries, ttl_seconds=args.replay_ttl)
+    except Exception as exc:
+        print(f"failed to initialize gateway replay cache: {exc}", file=sys.stderr)
+        return 2
+
+    gateway_handler = make_gateway_handler(
+        config=GatewayConfig(
+            upstream_url=args.upstream_url,
+            timeout=max(0.1, float(args.upstream_timeout)),
+            retry_attempts=max(0, int(args.upstream_retry_attempts)),
+            retry_backoff_s=max(0.0, float(args.upstream_retry_backoff_s)),
+        ),
+        session_binding_signing_key=session_binding_signing_key,
+        session_binding_store=session_binding_store,
+    )
+    try:
+        server = A2AHTTPServer(
+            args.host,
+            args.port,
+            handler=gateway_handler,
+            replay_cache=replay_cache,
+            enforce_replay=True,
+            security_policy=security_policy,
+            tls_certfile=args.tls_cert_file,
+            tls_keyfile=args.tls_key_file,
+            tls_ca_file=args.tls_ca_file,
+            tls_require_client_cert=args.tls_require_client_cert,
+        )
+    except Exception as exc:
+        _close_replay_cache(replay_cache)
+        print(f"failed to initialize gateway server: {exc}", file=sys.stderr)
+        return 2
+
+    scheme = "https" if args.tls_cert_file and args.tls_key_file else "http"
+    print(f"gateway listening on {scheme}://{args.host}:{args.port}/a2a")
+    print(f"forwarding upstream to {args.upstream_url}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+        _close_replay_cache(replay_cache)
+    return 0
+
+
+def _cmd_workflow(args: argparse.Namespace) -> int:
+    try:
+        plan = json.loads(pathlib.Path(args.plan_file).read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"failed to load workflow plan: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        report = execute_workflow_plan(
+            plan,
+            default_url=args.default_url,
+            default_timeout=max(0.1, float(args.timeout)),
+            default_retry_attempts=max(0, int(args.retry_attempts)),
+            default_retry_backoff_s=max(0.0, float(args.retry_backoff_s)),
+            fail_fast=not bool(args.no_fail_fast),
+        )
+    except Exception as exc:
+        print(f"workflow execution failed: {exc}", file=sys.stderr)
+        return 1
+
+    if args.format == "json":
+        print(json_dumps_pretty(report))
+    else:
+        print(render_workflow_text(report))
+    return 0 if report.get("status") == "success" else 1
 
 
 def _load_payload(payload_file: str | None, payload_json: str | None) -> Any:

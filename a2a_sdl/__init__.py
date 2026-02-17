@@ -10,6 +10,8 @@ from .envelope import (
 from .handlers import TrustGovernancePolicy
 from .codec import decode_bytes, encode_bytes
 from .conformance import render_conformance_json, render_conformance_text, run_conformance_suite
+from .gateway import GatewayConfig, make_gateway_handler
+from .orchestrator import execute_workflow_plan, render_workflow_text
 from .transport_http import send_http_with_auto_downgrade
 from .transport_ipc import IPCServer, send_ipc
 from .swarm import CodexBuddyServer, SwarmCoordinator
@@ -46,6 +48,10 @@ __all__ = [
     "run_conformance_suite",
     "render_conformance_text",
     "render_conformance_json",
+    "GatewayConfig",
+    "make_gateway_handler",
+    "execute_workflow_plan",
+    "render_workflow_text",
     "send_http_with_auto_downgrade",
     "send_ipc",
     "IPCServer",

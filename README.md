@@ -28,6 +28,8 @@ Published package: https://pypi.org/project/a2acrpt/ (current release: `0.2.0`)
 - HTTP/WS/IPC transport parity with structured protocol errors
 - Optional admin observability endpoints (`/healthz`, `/readyz`, `/metrics`)
 - Tamper-evident audit log with optional external hash anchoring
+- Session-aware edge gateway mode (`a2a gateway`) with mandatory replay + session binding enforcement
+- DAG workflow orchestrator mode (`a2a workflow`) for multi-step A2A executions
 
 ## Protocol Spec And Conformance
 
@@ -206,6 +208,77 @@ a2a serve --tool-policy-file tool_policy.json
 - IPC transport: local framed transport (`uint32_be`)
 - Built-in handlers: `task.v1`, `toolcall.v1`, `negotiation.v1`, `trustsync.v1`, `session.v1`
 - Custom handlers: `--handler-spec <ct>=<module>:<callable>`
+
+## Session-Aware Edge Gateway
+
+`a2a gateway` runs an enforcement edge in front of upstream agents:
+
+- Requires encrypted+signed+replay-protected inbound traffic
+- Requires `sec.session.binding_id` for non-exempt content types
+- Handles `session.v1` locally (establishes bindings), forwards data-plane requests upstream
+
+Example:
+
+```bash
+a2a gateway \
+  --host 0.0.0.0 --port 9443 \
+  --upstream-url https://agent.internal/a2a \
+  --trusted-signing-keys-file trusted_signing_keys.json \
+  --decrypt-keys-file decrypt_keys.json \
+  --agent-kid-map-file agent_kid_map.json \
+  --tls-cert-file /etc/a2a/tls/gateway.crt \
+  --tls-key-file /etc/a2a/tls/gateway.key \
+  --replay-redis-url redis://redis.internal:6379/2
+```
+
+## Workflow Orchestration
+
+`a2a workflow` executes dependency-aware plans (DAG) over A2A HTTP endpoints with per-step retry/timeouts.
+
+Minimal plan file:
+
+```json
+{
+  "name": "incident-triage",
+  "steps": [
+    {
+      "id": "classify",
+      "ct": "task.v1",
+      "url": "http://127.0.0.1:8080/a2a",
+      "payload": {
+        "kind": "task.v1",
+        "goal": "Classify incident severity",
+        "inputs": {},
+        "constraints": {"time_budget_s": 20, "compute_budget": "low", "safety": {}},
+        "deliverables": [{"type": "text", "description": "severity"}],
+        "acceptance": ["Return severity"],
+        "context": {}
+      }
+    },
+    {
+      "id": "notify",
+      "depends_on": ["classify"],
+      "ct": "task.v1",
+      "url": "http://127.0.0.1:8080/a2a",
+      "payload": {
+        "kind": "task.v1",
+        "goal": "Prepare notification draft",
+        "inputs": {},
+        "constraints": {"time_budget_s": 20, "compute_budget": "low", "safety": {}},
+        "deliverables": [{"type": "text", "description": "message"}],
+        "acceptance": ["Return notification draft"],
+        "context": {}
+      }
+    }
+  ]
+}
+```
+
+Run:
+
+```bash
+a2a workflow --plan-file workflow.json --format text
+```
 
 ## Operations
 

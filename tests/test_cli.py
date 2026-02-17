@@ -436,6 +436,69 @@ class CLITests(unittest.TestCase):
         self.assertTrue(report["passed"])
         self.assertEqual(report["summary"]["failed"], 0)
 
+    def test_gateway_prod_requires_tls_by_default(self) -> None:
+        with tempfile.NamedTemporaryFile("w+", suffix=".json") as trusted, tempfile.NamedTemporaryFile(
+            "w+", suffix=".json"
+        ) as decrypt:
+            trusted.write('{"kid-1":"pub"}')
+            trusted.flush()
+            decrypt.write('{"enc-1":"priv"}')
+            decrypt.flush()
+            with redirect_stdout(io.StringIO()):
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    code = main(
+                        [
+                            "gateway",
+                            "--upstream-url",
+                            "http://127.0.0.1:9999/a2a",
+                            "--trusted-signing-keys-file",
+                            trusted.name,
+                            "--decrypt-keys-file",
+                            decrypt.name,
+                        ]
+                    )
+        self.assertEqual(code, 2)
+        self.assertIn("requires TLS", stderr.getvalue())
+
+    def test_workflow_command_outputs_json(self) -> None:
+        plan = {
+            "name": "demo",
+            "steps": [
+                {
+                    "id": "step-1",
+                    "ct": "task.v1",
+                    "payload": {
+                        "kind": "task.v1",
+                        "goal": "x",
+                        "inputs": {},
+                        "constraints": {"time_budget_s": 1, "compute_budget": "low", "safety": {}},
+                        "deliverables": [{"type": "text", "description": "d"}],
+                        "acceptance": ["ok"],
+                        "context": {},
+                    },
+                    "url": "http://example/a2a",
+                }
+            ],
+        }
+        with tempfile.NamedTemporaryFile("w+", suffix=".json") as handle:
+            json.dump(plan, handle)
+            handle.flush()
+            with patch(
+                "a2a_sdl.cli.execute_workflow_plan",
+                return_value={
+                    "run_id": "workflow:1",
+                    "name": "demo",
+                    "status": "success",
+                    "summary": {"steps_total": 1, "steps_success": 1, "steps_failed": 0, "steps_skipped": 0},
+                    "steps": {"step-1": {"status": "success"}},
+                },
+            ):
+                with redirect_stdout(io.StringIO()) as stdout:
+                    code = main(["workflow", "--plan-file", handle.name, "--format", "json"])
+        self.assertEqual(code, 0)
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["status"], "success")
+
     def test_load_handler_spec_valid(self) -> None:
         ct, handler = _load_handler_spec("artifact.v1=json:loads")
         self.assertEqual(ct, "artifact.v1")
