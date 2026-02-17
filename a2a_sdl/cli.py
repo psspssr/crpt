@@ -30,6 +30,7 @@ from .security import (
 )
 from .replay import RedisReplayCache, ReplayCache, SQLiteReplayCache
 from .session import SessionBindingStore
+from .startup_knowledge import render_startup_knowledge_json, render_startup_knowledge_text
 from .swarm import BuddyEndpoint, CodexBackend, CodexBuddyServer, SwarmCoordinator
 from .transport_http import AdmissionController, A2AHTTPServer, send_http, send_http_with_auto_downgrade
 from .utils import json_dumps_pretty, new_message_id, sha256_prefixed
@@ -485,6 +486,10 @@ def main(argv: list[str] | None = None) -> int:
     vectors.add_argument("--out-dir", default="docs/interop-vectors", help="Directory where vectors are written")
     vectors.add_argument("--verify", action="store_true", help="Validate generated vectors after writing")
     vectors.set_defaults(func=_cmd_vectors)
+
+    knowledge = subparsers.add_parser("knowledge", help="Print built-in startup knowledge for installed agents")
+    knowledge.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
+    knowledge.set_defaults(func=_cmd_knowledge)
 
     args = parser.parse_args(argv)
     return args.func(args)
@@ -1232,6 +1237,14 @@ def _cmd_vectors(args: argparse.Namespace) -> int:
             return 1
 
     print(json_dumps_pretty({"written": written, "count": len(written), "verified": bool(args.verify)}))
+    return 0
+
+
+def _cmd_knowledge(args: argparse.Namespace) -> int:
+    if args.format == "json":
+        print(render_startup_knowledge_json())
+    else:
+        print(render_startup_knowledge_text())
     return 0
 
 

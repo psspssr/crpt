@@ -34,6 +34,7 @@ Published package: https://pypi.org/project/a2acrpt/ (current release: `0.2.1`)
 - Session-aware edge gateway mode (`a2a gateway`) with mandatory replay + session binding enforcement
 - DAG workflow orchestrator mode (`a2a workflow`) for multi-step A2A executions
 - Canonical interoperability vector generation (`a2a vectors`)
+- Built-in runtime startup context (`a2a knowledge`) so installed agents can bootstrap with protocol-aware defaults
 
 ## Protocol Spec And Conformance
 
@@ -79,24 +80,40 @@ Current matrix target:
 Recommended (isolated CLI install with `uv`):
 
 ```bash
-uv tool install --upgrade "a2acrpt[full]"
+uv tool install --upgrade a2acrpt
 uv tool update-shell
 ```
 
 Alternatives:
 
 ```bash
-pipx install "a2acrpt[full]"
-pip install "a2acrpt[full]"
+pipx install a2acrpt
+pip install a2acrpt
 ```
 
-Optional extras:
+Default install profile is now `full` (HTTP/WS/schema/CBOR/Redis dependencies included).
 
+Compatibility extras:
+
+- `a2acrpt[full]` (legacy alias; same as default install)
 - `a2acrpt[cbor]`
 - `a2acrpt[schema]`
 - `a2acrpt[http]`
 - `a2acrpt[ws]`
 - `a2acrpt[redis]`
+
+Contributor extras:
+
+- `a2acrpt[dev]`
+
+## Startup Knowledge
+
+Use the built-in startup context command when an installed runtime needs protocol defaults, security baseline, and command map:
+
+```bash
+a2a knowledge
+a2a knowledge --format json
+```
 
 ## Quick Start
 

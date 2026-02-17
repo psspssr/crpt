@@ -509,6 +509,22 @@ class CLITests(unittest.TestCase):
         self.assertTrue(report["passed"])
         self.assertEqual(report["summary"]["failed"], 0)
 
+    def test_knowledge_command_outputs_json(self) -> None:
+        with redirect_stdout(io.StringIO()) as stdout:
+            code = main(["knowledge", "--format", "json"])
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["project"]["name"], "A2A-SDL")
+        self.assertEqual(payload["install"]["default_profile"], "full")
+
+    def test_knowledge_command_outputs_text(self) -> None:
+        with redirect_stdout(io.StringIO()) as stdout:
+            code = main(["knowledge"])
+        self.assertEqual(code, 0)
+        rendered = stdout.getvalue()
+        self.assertIn("A2A-SDL startup knowledge", rendered)
+        self.assertIn("a2a serve", rendered)
+
     def test_gateway_prod_requires_tls_by_default(self) -> None:
         with tempfile.NamedTemporaryFile("w+", suffix=".json") as trusted, tempfile.NamedTemporaryFile(
             "w+", suffix=".json"

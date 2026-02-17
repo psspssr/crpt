@@ -20,6 +20,7 @@ from .swarm import CodexBuddyServer, SwarmCoordinator
 from .audit import AuditChain, HTTPAuditAnchor, verify_audit_chain
 from .policy import SecurityPolicy, SecurityPolicyManager
 from .session import SessionBindingRecord, SessionBindingStore, build_session_binding_doc, compute_session_binding_id
+from .startup_knowledge import get_startup_knowledge, render_startup_knowledge_json, render_startup_knowledge_text
 from .workflow_state import SQLiteWorkflowStateStore, WorkflowRunSnapshot
 from .security import (
     decrypt_payload,
@@ -72,6 +73,9 @@ __all__ = [
     "SessionBindingStore",
     "build_session_binding_doc",
     "compute_session_binding_id",
+    "get_startup_knowledge",
+    "render_startup_knowledge_text",
+    "render_startup_knowledge_json",
     "SQLiteWorkflowStateStore",
     "WorkflowRunSnapshot",
     "RuntimeVersionPolicy",
