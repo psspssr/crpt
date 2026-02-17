@@ -69,6 +69,16 @@ Optional replay block:
 - `sec.replay.nonce` non-empty string
 - `sec.replay.exp` RFC3339 UTC string
 
+Optional identity block:
+
+- `sec.identity.jwt` compact JWT string (OIDC-compatible)
+- Verification (issuer/audience/subject/tenant claims) is policy-driven at runtime.
+
+Optional tenant hint block:
+
+- `sec.tenant` string tenant id, or object `{ "id": "<tenant-id>" }`
+- Tenant allowlist and agent-to-tenant mapping enforcement are policy-driven at runtime.
+
 Replay validation behavior:
 
 - Expired replay window is rejected.
@@ -336,4 +346,5 @@ Error mapping rules:
 - Implementations should preserve error codes and semantics above for deterministic client behavior.
 - If URI schemas are enabled in custom deployments, URI fetch must remain hash-verified and SSRF-safe.
 - For negotiation and downgrade flows, `UNSUPPORTED_CT` responses should include `details.supported_ct`.
-
+- Canonical vectors can be generated with:
+  - `a2a vectors --out-dir docs/interop-vectors --verify`

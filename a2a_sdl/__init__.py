@@ -11,6 +11,8 @@ from .handlers import TrustGovernancePolicy
 from .codec import decode_bytes, encode_bytes
 from .conformance import render_conformance_json, render_conformance_text, run_conformance_suite
 from .gateway import GatewayConfig, make_gateway_handler
+from .interoperability import build_interop_vectors, write_interop_vectors
+from .observability import JSONLMetricsExporter
 from .orchestrator import execute_workflow_plan, render_workflow_text
 from .transport_http import send_http_with_auto_downgrade
 from .transport_ipc import IPCServer, send_ipc
@@ -18,6 +20,7 @@ from .swarm import CodexBuddyServer, SwarmCoordinator
 from .audit import AuditChain, HTTPAuditAnchor, verify_audit_chain
 from .policy import SecurityPolicy, SecurityPolicyManager
 from .session import SessionBindingRecord, SessionBindingStore, build_session_binding_doc, compute_session_binding_id
+from .workflow_state import SQLiteWorkflowStateStore, WorkflowRunSnapshot
 from .security import (
     decrypt_payload,
     encrypt_payload,
@@ -50,6 +53,9 @@ __all__ = [
     "render_conformance_json",
     "GatewayConfig",
     "make_gateway_handler",
+    "build_interop_vectors",
+    "write_interop_vectors",
+    "JSONLMetricsExporter",
     "execute_workflow_plan",
     "render_workflow_text",
     "send_http_with_auto_downgrade",
@@ -66,6 +72,8 @@ __all__ = [
     "SessionBindingStore",
     "build_session_binding_doc",
     "compute_session_binding_id",
+    "SQLiteWorkflowStateStore",
+    "WorkflowRunSnapshot",
     "RuntimeVersionPolicy",
     "decrypt_payload",
     "encrypt_payload",

@@ -393,6 +393,79 @@ class CLITests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("requires durable replay storage", stderr.getvalue())
 
+    def test_serve_prod_admin_endpoints_require_admin_token(self) -> None:
+        with tempfile.NamedTemporaryFile("w+", suffix=".json") as trusted, tempfile.NamedTemporaryFile(
+            "w+", suffix=".json"
+        ) as decrypt:
+            trusted.write('{"kid-1":"pub"}')
+            trusted.flush()
+            decrypt.write('{"enc-1":"priv"}')
+            decrypt.flush()
+            with redirect_stdout(io.StringIO()):
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    code = main(
+                        [
+                            "serve",
+                            "--deployment-mode",
+                            "prod",
+                            "--trusted-signing-keys-file",
+                            trusted.name,
+                            "--decrypt-keys-file",
+                            decrypt.name,
+                            "--tls-cert-file",
+                            "cert.pem",
+                            "--tls-key-file",
+                            "key.pem",
+                            "--replay-db-file",
+                            "replay.sqlite",
+                            "--admin-endpoints",
+                        ]
+                    )
+        self.assertEqual(code, 2)
+        self.assertIn("requires --admin-token", stderr.getvalue())
+
+    def test_serve_oidc_required_needs_jwks_file(self) -> None:
+        with redirect_stdout(io.StringIO()):
+            with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                code = main(["serve", "--deployment-mode", "dev", "--oidc-required"])
+        self.assertEqual(code, 2)
+        self.assertIn("--oidc-required needs --oidc-jwks-file", stderr.getvalue())
+
+    def test_serve_oidc_jwks_requires_trusted_signing_keys(self) -> None:
+        with tempfile.NamedTemporaryFile("w+", suffix=".json") as jwks:
+            jwks.write('{"keys":[]}')
+            jwks.flush()
+            with redirect_stdout(io.StringIO()):
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    code = main(
+                        [
+                            "serve",
+                            "--deployment-mode",
+                            "dev",
+                            "--oidc-jwks-file",
+                            jwks.name,
+                        ]
+                    )
+        self.assertEqual(code, 2)
+        self.assertIn("secure policy options require trusted signing keys", stderr.getvalue())
+
+    def test_serve_metrics_export_interval_requires_positive_value(self) -> None:
+        with redirect_stdout(io.StringIO()):
+            with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                code = main(
+                    [
+                        "serve",
+                        "--deployment-mode",
+                        "dev",
+                        "--metrics-export-file",
+                        "metrics.jsonl",
+                        "--metrics-export-interval-s",
+                        "0",
+                    ]
+                )
+        self.assertEqual(code, 2)
+        self.assertIn("metrics-export-interval-s must be > 0", stderr.getvalue())
+
     def test_serve_reports_tls_initialization_error(self) -> None:
         with redirect_stdout(io.StringIO()):
             with patch("sys.stderr", new_callable=io.StringIO) as stderr:
@@ -460,6 +533,33 @@ class CLITests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("requires TLS", stderr.getvalue())
 
+    def test_gateway_oidc_required_needs_jwks_file(self) -> None:
+        with tempfile.NamedTemporaryFile("w+", suffix=".json") as trusted, tempfile.NamedTemporaryFile(
+            "w+", suffix=".json"
+        ) as decrypt:
+            trusted.write('{"kid-1":"pub"}')
+            trusted.flush()
+            decrypt.write('{"enc-1":"priv"}')
+            decrypt.flush()
+            with redirect_stdout(io.StringIO()):
+                with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                    code = main(
+                        [
+                            "gateway",
+                            "--deployment-mode",
+                            "dev",
+                            "--upstream-url",
+                            "http://127.0.0.1:9999/a2a",
+                            "--trusted-signing-keys-file",
+                            trusted.name,
+                            "--decrypt-keys-file",
+                            decrypt.name,
+                            "--oidc-required",
+                        ]
+                    )
+        self.assertEqual(code, 2)
+        self.assertIn("--oidc-required needs --oidc-jwks-file", stderr.getvalue())
+
     def test_workflow_command_outputs_json(self) -> None:
         plan = {
             "name": "demo",
@@ -499,6 +599,22 @@ class CLITests(unittest.TestCase):
         report = json.loads(stdout.getvalue())
         self.assertEqual(report["status"], "success")
 
+    def test_workflow_requires_plan_or_resume_state(self) -> None:
+        with redirect_stdout(io.StringIO()):
+            with patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                code = main(["workflow"])
+        self.assertEqual(code, 2)
+        self.assertIn("requires --plan-file", stderr.getvalue())
+
+    def test_vectors_command_writes_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with redirect_stdout(io.StringIO()) as stdout:
+                code = main(["vectors", "--out-dir", tmpdir, "--verify"])
+        self.assertEqual(code, 0)
+        report = json.loads(stdout.getvalue())
+        self.assertTrue(report["verified"])
+        self.assertGreaterEqual(report["count"], 4)
+
     def test_load_handler_spec_valid(self) -> None:
         ct, handler = _load_handler_spec("artifact.v1=json:loads")
         self.assertEqual(ct, "artifact.v1")
@@ -528,6 +644,7 @@ class CLITests(unittest.TestCase):
           "trusted_signing_keys": {"kid-1": "pub1"},
           "required_kid_by_agent": {"agent-a": "kid-1"},
           "allowed_kids_by_agent": {"agent-a": ["kid-1", "kid-2"]},
+          "tenant_by_agent": {"agent-a": "tenant-1"},
           "revoked_kids": ["kid-old"],
           "kid_not_after": {"kid-1": "2099-01-01T00:00:00Z"}
         }
@@ -538,6 +655,7 @@ class CLITests(unittest.TestCase):
             registry = _load_key_registry(tmp.name)
         self.assertEqual(registry["trusted_signing_keys"]["kid-1"], "pub1")
         self.assertIn("kid-2", registry["allowed_kids_by_agent"]["agent-a"])
+        self.assertEqual(registry["tenant_by_agent"]["agent-a"], "tenant-1")
         self.assertIn("kid-old", registry["revoked_kids"])
 
 

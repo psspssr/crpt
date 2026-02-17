@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import threading
 import time
 import urllib.error
@@ -8,6 +9,7 @@ import urllib.request
 import unittest
 
 from a2a_sdl.handlers import default_handler
+from a2a_sdl.observability import JSONLMetricsExporter
 from a2a_sdl.transport_http import AdmissionController, A2AHTTPServer, send_http
 
 from tests.test_helpers import make_task_envelope
@@ -63,6 +65,14 @@ class HTTPAdminTests(unittest.TestCase):
             with urllib.request.urlopen(metrics_req, timeout=10) as response:
                 metrics_text = response.read().decode("utf-8")
             self.assertIn("a2a_requests_total", metrics_text)
+
+            metrics_json_req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/metrics.json",
+                headers={"Authorization": "Bearer secret-token"},
+            )
+            with urllib.request.urlopen(metrics_json_req, timeout=10) as response:
+                metrics_json = json.loads(response.read().decode("utf-8"))
+            self.assertIn("requests_total", metrics_json)
         finally:
             server.shutdown()
             thread.join(timeout=1)
@@ -109,6 +119,36 @@ class HTTPAdminTests(unittest.TestCase):
         finally:
             server.shutdown()
             thread.join(timeout=1)
+
+    def test_metrics_export_file_receives_periodic_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exporter = JSONLMetricsExporter(f"{tmpdir}/metrics.jsonl")
+            server = A2AHTTPServer(
+                "127.0.0.1",
+                0,
+                handler=default_handler,
+                metrics_exporter=exporter,
+                metrics_export_interval_s=0.05,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            time.sleep(0.05)
+
+            try:
+                port = server._server.server_address[1]
+                url = f"http://127.0.0.1:{port}/a2a"
+                response = send_http(url, make_task_envelope(), encoding="json", timeout=10.0)
+                self.assertEqual(response["ct"], "state.v1")
+                time.sleep(0.12)
+            finally:
+                server.shutdown()
+                thread.join(timeout=1)
+
+            with open(f"{tmpdir}/metrics.jsonl", "r", encoding="utf-8") as handle:
+                lines = [line.strip() for line in handle.readlines() if line.strip()]
+            self.assertGreaterEqual(len(lines), 1)
+            first = json.loads(lines[0])
+            self.assertIn("metrics", first)
 
 
 if __name__ == "__main__":

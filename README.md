@@ -6,7 +6,7 @@
 
 A2A-SDL is a production-oriented reference implementation of a self-describing agent-to-agent protocol with strict envelope validation, deterministic encoding, and optional cryptographic security.
 
-Published package: https://pypi.org/project/a2acrpt/ (current release: `0.2.0`)
+Published package: https://pypi.org/project/a2acrpt/ (current release: `0.2.1`)
 
 ## Project Status
 
@@ -24,20 +24,26 @@ Published package: https://pypi.org/project/a2acrpt/ (current release: `0.2.0`)
 - Security primitives: Ed25519 signatures, X25519 + ChaCha20-Poly1305 encryption
 - Replay protection backends: in-memory, SQLite, Redis
 - Secure policy enforcement (`enc+sig+replay`, key trust maps, key rotation/revocation/expiry)
+- OIDC JWT identity checks with JWKS verification (`sec.identity.jwt`)
+- Multi-tenant policy controls (tenant allowlist + per-agent tenant mapping)
 - Runtime compatibility and migration policy enforcement (`cap.a2a_sdl.v`, deprecation/version ranges)
 - HTTP/WS/IPC transport parity with structured protocol errors
-- Optional admin observability endpoints (`/healthz`, `/readyz`, `/metrics`)
+- Optional admin observability endpoints (`/healthz`, `/readyz`, `/metrics`, `/metrics.json`)
+- Optional JSONL metrics exporter for external collectors
 - Tamper-evident audit log with optional external hash anchoring
 - Session-aware edge gateway mode (`a2a gateway`) with mandatory replay + session binding enforcement
 - DAG workflow orchestrator mode (`a2a workflow`) for multi-step A2A executions
+- Canonical interoperability vector generation (`a2a vectors`)
 
 ## Protocol Spec And Conformance
 
 - Normative wire contract: `docs/protocol-v1.md`
 - Conformance runner: `a2a conformance`
+- Interop vector generator: `a2a vectors --out-dir docs/interop-vectors --verify`
 - Test categories:
   - Golden vectors (valid flows)
   - Negative vectors (expected validation failures)
+  - Session/trustsync handler coverage (`session.v1`, `trustsync.v1`)
   - Failure mapping checks (`UNSUPPORTED_CT`, `UNSUPPORTED_ENCODING`, etc.)
   - Transport load checks (concurrent roundtrip)
 
@@ -180,6 +186,9 @@ a2a send \
 
 - `--secure-required`: requires encrypted + signed + replay-protected inbound envelopes
 - Key lifecycle controls: required key per agent, rotation sets, revocation, key expiry
+- OIDC identity enforcement: `--oidc-required --oidc-jwks-file ...`
+- Tenant isolation controls: `--tenant-required --tenant-allow ... --agent-tenant-map-file ...`
+- OIDC and tenant controls are layered on signed envelopes; configure trusted signing keys (`--trusted-signing-keys-file` or `--key-registry-file`)
 - `trustsync.v1`: signed trust-registry discovery/proposal flow
 - `session.v1`: negotiated binding handshake with optional detached signature
 - Optional runtime migration policy: `--version-policy-file`
@@ -283,8 +292,26 @@ a2a workflow --plan-file workflow.json --format text
 ## Operations
 
 - Observability endpoints: `/healthz`, `/readyz`, `/metrics`
+- Machine-readable metrics endpoint: `/metrics.json`
+- Periodic metrics snapshot export: `--metrics-export-file` + `--metrics-export-interval-s`
 - Audit chain: append-only hash chain with optional Ed25519 receipts
 - External audit anchoring: `--audit-anchor-url` (+ optional fail-closed mode)
+- Operational checklist: `docs/operations-hardening.md`
+
+## Interoperability Vectors
+
+Generate canonical request/response vectors that other implementations can consume:
+
+```bash
+a2a vectors --out-dir docs/interop-vectors --verify
+```
+
+The generated artifacts include:
+
+- `task.request.json`
+- `task.response.json`
+- `negotiation.request.json`
+- `negotiation.response.json`
 
 ## Advanced
 
@@ -309,11 +336,11 @@ Release flow:
 
 1. Bump version in `pyproject.toml`
 2. Merge to `main`
-3. Tag and push (for example `v0.1.1`)
+3. Tag and push (for example `v0.2.1`)
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 ## Security Reporting

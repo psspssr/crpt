@@ -15,6 +15,11 @@ class ConformanceTests(unittest.TestCase):
         self.assertTrue(report["passed"])
         self.assertEqual(report["summary"]["failed"], 0)
         self.assertEqual(report["summary"]["transports"], ["core"])
+        results = report.get("results", [])
+        self.assertTrue(isinstance(results, list))
+        case_ids = {str(item.get("case_id")) for item in results if isinstance(item, dict)}
+        self.assertIn("core.valid.session_open_roundtrip", case_ids)
+        self.assertIn("core.valid.trustsync_discover_roundtrip", case_ids)
 
     def test_conformance_http_dev_profile_passes(self) -> None:
         report = run_conformance_suite(
@@ -44,4 +49,3 @@ class ConformanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

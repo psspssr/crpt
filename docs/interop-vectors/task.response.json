@@ -1,0 +1,84 @@
+{
+  "cap": {
+    "a2a_sdl": {
+      "comp": [],
+      "enc": [
+        "json"
+      ],
+      "kex": [
+        "x25519"
+      ],
+      "sig": [
+        "ed25519"
+      ],
+      "v": 1
+    },
+    "limits": {
+      "max_array_len": 10000,
+      "max_bytes": 1048576,
+      "max_depth": 64,
+      "max_hops": 8
+    },
+    "modalities": [
+      "text"
+    ],
+    "tools": [
+      "math.add",
+      "sys.ping"
+    ]
+  },
+  "ct": "state.v1",
+  "from": {
+    "agent_id": "did:key:vector-receiver",
+    "instance": "interop",
+    "name": "vector-receiver",
+    "role": "executor"
+  },
+  "id": "vector-task-res",
+  "payload": {
+    "base": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "patch": [
+      {
+        "op": "add",
+        "path": "/status",
+        "value": "accepted"
+      },
+      {
+        "op": "add",
+        "path": "/goal",
+        "value": "Return protocol status"
+      }
+    ]
+  },
+  "schema": {
+    "embedded": {
+      "properties": {
+        "base": {
+          "type": "string"
+        },
+        "patch": {
+          "items": {
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "base",
+        "patch"
+      ],
+      "type": "object"
+    },
+    "id": "sha256:adf31fbaa9e6eecf1b64fa3cfc9bcf673cb7253decbe50d006d6cc3cf8f1675e",
+    "kind": "embedded"
+  },
+  "to": {
+    "agent_id": "did:key:vector-sender",
+    "instance": "interop",
+    "name": "vector-sender",
+    "role": "planner"
+  },
+  "ts": "2026-01-01T00:00:00Z",
+  "type": "res",
+  "v": 1
+}

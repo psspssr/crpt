@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import unittest
+from typing import Any
 
 from a2a_sdl.envelope import EnvelopeValidationError
 from a2a_sdl.policy import SecurityPolicy, SecurityPolicyManager, enforce_request_security
@@ -18,11 +19,22 @@ from tests.test_helpers import make_task_envelope
 
 
 class SecurityPolicyTests(unittest.TestCase):
+    class _StubOIDCVerifier:
+        def __init__(self, *, claims: dict[str, Any] | None = None, error: Exception | None = None) -> None:
+            self.claims = claims or {}
+            self.error = error
+
+        def verify(self, token: str) -> dict[str, Any]:
+            if self.error is not None:
+                raise self.error
+            return dict(self.claims)
+
     def _make_secure_request(
         self,
         *,
         session_binding_id: str | None = None,
         session_exp: str | None = None,
+        identity_jwt: str | None = None,
     ):
         env = make_task_envelope()
         env["from"]["agent_id"] = "did:key:agent-a"
@@ -46,6 +58,8 @@ class SecurityPolicyTests(unittest.TestCase):
             if session_exp is not None:
                 sec_session["exp"] = session_exp
             sec["session"] = sec_session
+        if identity_jwt is not None:
+            sec["identity"] = {"jwt": identity_jwt}
         sign_envelope(env, signing_keys["private_key_b64"], kid="did:key:agent-a#sig1")
 
         policy = SecurityPolicy(
@@ -118,6 +132,7 @@ class SecurityPolicyTests(unittest.TestCase):
                 "trusted_signing_keys": {"kid-1": "pub-1"},
                 "required_kid_by_agent": {"did:key:agent-a": "kid-1"},
                 "allowed_kids_by_agent": {"did:key:agent-a": ["kid-1", "kid-2"]},
+                "tenant_by_agent": {"did:key:agent-a": "tenant-a"},
                 "revoked_kids": ["kid-old"],
                 "kid_not_after": {"kid-1": "2099-01-01T00:00:00Z"},
             },
@@ -127,6 +142,7 @@ class SecurityPolicyTests(unittest.TestCase):
         self.assertNotEqual(before, updated_hash)
         snapshot = manager.snapshot()
         self.assertIn("kid-1", snapshot["trusted_signing_keys"])
+        self.assertEqual(snapshot["tenant_by_agent"]["did:key:agent-a"], "tenant-a")
         self.assertIn("kid-old", snapshot["revoked_kids"])
 
     def test_session_binding_required_rejects_missing_sec_session(self) -> None:
@@ -178,6 +194,55 @@ class SecurityPolicyTests(unittest.TestCase):
         policy.session_binding_exempt_ct = {"task.v1", "session.v1", "error.v1"}
 
         enforce_request_security(env, policy, ReplayCache())
+
+    def test_oidc_required_rejects_missing_identity(self) -> None:
+        env, policy = self._make_secure_request()
+        policy.oidc_required = True
+        policy.oidc_verifier = self._StubOIDCVerifier(claims={"sub": env["from"]["agent_id"]})
+
+        with self.assertRaises(EnvelopeValidationError):
+            enforce_request_security(env, policy, ReplayCache())
+
+    def test_oidc_optional_allows_missing_identity(self) -> None:
+        env, policy = self._make_secure_request()
+        policy.oidc_required = False
+        policy.oidc_verifier = self._StubOIDCVerifier(claims={"sub": env["from"]["agent_id"]})
+
+        enforce_request_security(env, policy, ReplayCache())
+
+    def test_oidc_required_accepts_matching_subject(self) -> None:
+        env, policy = self._make_secure_request(identity_jwt="header.payload.sig")
+        policy.oidc_required = True
+        policy.oidc_verifier = self._StubOIDCVerifier(claims={"sub": env["from"]["agent_id"], "tid": "tenant-a"})
+
+        enforce_request_security(env, policy, ReplayCache())
+
+    def test_tenant_required_rejects_missing_tenant_context(self) -> None:
+        env, policy = self._make_secure_request()
+        policy.require_tenant = True
+
+        with self.assertRaises(EnvelopeValidationError):
+            enforce_request_security(env, policy, ReplayCache())
+
+    def test_tenant_allowlist_accepts_sender_mapping(self) -> None:
+        env, policy = self._make_secure_request()
+        from_agent = env["from"]["agent_id"]
+        to_agent = env["to"]["agent_id"]
+        policy.require_tenant = True
+        policy.allowed_tenants = {"tenant-a"}
+        policy.tenant_by_agent = {from_agent: "tenant-a", to_agent: "tenant-a"}
+
+        enforce_request_security(env, policy, ReplayCache())
+
+    def test_tenant_rejects_cross_tenant_route(self) -> None:
+        env, policy = self._make_secure_request()
+        from_agent = env["from"]["agent_id"]
+        to_agent = env["to"]["agent_id"]
+        policy.require_tenant = True
+        policy.tenant_by_agent = {from_agent: "tenant-a", to_agent: "tenant-b"}
+
+        with self.assertRaises(EnvelopeValidationError):
+            enforce_request_security(env, policy, ReplayCache())
 
 
 if __name__ == "__main__":

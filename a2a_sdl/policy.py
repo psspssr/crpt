@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .envelope import EnvelopeValidationError
+from .identity import IdentityError, OIDCVerifierProtocol
 from .replay import ReplayCacheProtocol
 from .schema import SchemaValidationError, validate_payload
 from .security import SecurityError, decrypt_payload, verify_envelope_signature
@@ -33,6 +34,13 @@ class SecurityPolicy:
     session_binding_exempt_ct: set[str] = field(
         default_factory=lambda: {"session.v1", "error.v1", "negotiation.v1"}
     )
+    require_tenant: bool = False
+    allowed_tenants: set[str] = field(default_factory=set)
+    tenant_by_agent: dict[str, str] = field(default_factory=dict)
+    oidc_required: bool = False
+    oidc_verifier: OIDCVerifierProtocol | None = None
+    oidc_agent_id_claim: str = "sub"
+    oidc_tenant_claim: str = "tid"
 
 
 @dataclass(slots=True)
@@ -52,6 +60,7 @@ class SecurityPolicyManager:
                 "allowed_kids_by_agent": {
                     key: sorted(values) for key, values in sorted(self.policy.allowed_kids_by_agent.items())
                 },
+                "tenant_by_agent": dict(sorted(self.policy.tenant_by_agent.items())),
                 "revoked_kids": sorted(self.policy.revoked_kids),
                 "kid_not_after": dict(sorted(self.policy.kid_not_after.items())),
                 "updated_at": self._updated_at,
@@ -73,6 +82,7 @@ class SecurityPolicyManager:
                 for agent_id, kids in normalized["allowed_kids_by_agent"].items():
                     existing = self.policy.allowed_kids_by_agent.get(agent_id, set())
                     self.policy.allowed_kids_by_agent[agent_id] = set(existing) | set(kids)
+                self.policy.tenant_by_agent.update(normalized["tenant_by_agent"])
                 self.policy.revoked_kids.update(normalized["revoked_kids"])
                 self.policy.kid_not_after.update(normalized["kid_not_after"])
                 self.policy.decrypt_private_keys.update(normalized["decrypt_private_keys"])
@@ -82,6 +92,7 @@ class SecurityPolicyManager:
                 self.policy.allowed_kids_by_agent = {
                     key: set(values) for key, values in normalized["allowed_kids_by_agent"].items()
                 }
+                self.policy.tenant_by_agent = dict(normalized["tenant_by_agent"])
                 self.policy.revoked_kids = set(normalized["revoked_kids"])
                 self.policy.kid_not_after = dict(normalized["kid_not_after"])
                 self.policy.decrypt_private_keys = dict(normalized["decrypt_private_keys"])
@@ -154,6 +165,14 @@ def enforce_request_security(
         verify_envelope_signature(envelope, public_key)
     except SecurityError as exc:
         raise EnvelopeValidationError(f"signature verification failed: {exc}") from exc
+
+    oidc_claims = _enforce_oidc_identity(envelope, policy, agent_id)
+    _enforce_tenant_isolation(
+        envelope,
+        policy,
+        agent_id=agent_id,
+        oidc_claims=oidc_claims,
+    )
 
     if policy.require_replay:
         _enforce_replay(envelope, replay_cache)
@@ -285,6 +304,122 @@ def _enforce_session_binding(envelope: dict[str, Any], policy: SecurityPolicy) -
         raise EnvelopeValidationError("security policy rejects unknown or expired session binding")
 
 
+def _enforce_oidc_identity(
+    envelope: dict[str, Any],
+    policy: SecurityPolicy,
+    agent_id: str,
+) -> dict[str, Any] | None:
+    if not policy.oidc_required and policy.oidc_verifier is None:
+        return None
+
+    sec = envelope.get("sec")
+    if not isinstance(sec, dict):
+        if policy.oidc_required:
+            raise EnvelopeValidationError("security policy requires sec block for oidc")
+        return None
+    identity = sec.get("identity")
+    if not isinstance(identity, dict):
+        if policy.oidc_required:
+            raise EnvelopeValidationError("security policy requires sec.identity")
+        return None
+    token = identity.get("jwt")
+    if not isinstance(token, str) or not token:
+        if policy.oidc_required:
+            raise EnvelopeValidationError("security policy requires sec.identity.jwt")
+        return None
+
+    verifier = policy.oidc_verifier
+    if verifier is None:
+        raise EnvelopeValidationError("security policy requires oidc verifier")
+
+    try:
+        claims = verifier.verify(token)
+    except IdentityError as exc:
+        raise EnvelopeValidationError(f"security policy oidc verification failed: {exc}") from exc
+
+    claim_key = policy.oidc_agent_id_claim or "sub"
+    claim_value = claims.get(claim_key)
+    if not isinstance(claim_value, str) or not claim_value:
+        raise EnvelopeValidationError(f"security policy oidc claim '{claim_key}' missing")
+    if agent_id and claim_value != agent_id:
+        raise EnvelopeValidationError("security policy oidc subject/agent mismatch")
+    return claims
+
+
+def _enforce_tenant_isolation(
+    envelope: dict[str, Any],
+    policy: SecurityPolicy,
+    *,
+    agent_id: str,
+    oidc_claims: dict[str, Any] | None,
+) -> None:
+    if not policy.require_tenant and not policy.allowed_tenants and not policy.tenant_by_agent:
+        return
+
+    to_identity = envelope.get("to")
+    to_agent_id = ""
+    if isinstance(to_identity, dict):
+        to_agent_raw = to_identity.get("agent_id")
+        if isinstance(to_agent_raw, str):
+            to_agent_id = to_agent_raw
+
+    tenant_id = _resolve_tenant_id(
+        envelope,
+        policy,
+        agent_id=agent_id,
+        oidc_claims=oidc_claims,
+    )
+
+    mapped_sender_tenant = policy.tenant_by_agent.get(agent_id)
+    if mapped_sender_tenant is not None and tenant_id is not None and tenant_id != mapped_sender_tenant:
+        raise EnvelopeValidationError("security policy tenant mismatch for sender")
+    if tenant_id is None and mapped_sender_tenant is not None:
+        tenant_id = mapped_sender_tenant
+
+    mapped_receiver_tenant = policy.tenant_by_agent.get(to_agent_id)
+    if mapped_receiver_tenant is not None and tenant_id is not None and tenant_id != mapped_receiver_tenant:
+        raise EnvelopeValidationError("security policy tenant mismatch between sender and receiver")
+
+    if policy.require_tenant and (not isinstance(tenant_id, str) or not tenant_id):
+        raise EnvelopeValidationError("security policy requires tenant context")
+
+    if policy.allowed_tenants:
+        if not isinstance(tenant_id, str) or not tenant_id:
+            raise EnvelopeValidationError("security policy requires tenant for allowlist")
+        if tenant_id not in policy.allowed_tenants:
+            raise EnvelopeValidationError("security policy rejects tenant")
+
+
+def _resolve_tenant_id(
+    envelope: dict[str, Any],
+    policy: SecurityPolicy,
+    *,
+    agent_id: str,
+    oidc_claims: dict[str, Any] | None,
+) -> str | None:
+    if oidc_claims is not None:
+        claim_key = policy.oidc_tenant_claim or "tid"
+        claim_value = oidc_claims.get(claim_key)
+        if isinstance(claim_value, str) and claim_value:
+            return claim_value
+
+    sec = envelope.get("sec")
+    if isinstance(sec, dict):
+        tenant = sec.get("tenant")
+        if isinstance(tenant, str) and tenant:
+            return tenant
+        if isinstance(tenant, dict):
+            tenant_id = tenant.get("id")
+            if isinstance(tenant_id, str) and tenant_id:
+                return tenant_id
+
+    if agent_id:
+        mapped = policy.tenant_by_agent.get(agent_id)
+        if isinstance(mapped, str) and mapped:
+            return mapped
+    return None
+
+
 def _parse_iso_utc(value: str) -> dt.datetime:
     parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None:
@@ -300,6 +435,7 @@ def _normalize_registry_payload(registry: dict[str, Any]) -> dict[str, Any]:
     required = _normalize_str_map(registry.get("required_kid_by_agent"), "required_kid_by_agent")
     kid_not_after = _normalize_str_map(registry.get("kid_not_after"), "kid_not_after")
     decrypt = _normalize_str_map(registry.get("decrypt_private_keys"), "decrypt_private_keys")
+    tenant = _normalize_str_map(registry.get("tenant_by_agent"), "tenant_by_agent")
     allowed = _normalize_str_map_of_sets(registry.get("allowed_kids_by_agent"), "allowed_kids_by_agent")
     revoked = _normalize_str_set(registry.get("revoked_kids"), "revoked_kids")
 
@@ -310,6 +446,7 @@ def _normalize_registry_payload(registry: dict[str, Any]) -> dict[str, Any]:
         "trusted_signing_keys": trusted,
         "required_kid_by_agent": required,
         "allowed_kids_by_agent": allowed,
+        "tenant_by_agent": tenant,
         "revoked_kids": revoked,
         "kid_not_after": kid_not_after,
         "decrypt_private_keys": decrypt,

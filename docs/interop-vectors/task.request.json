@@ -1,0 +1,150 @@
+{
+  "cap": {
+    "a2a_sdl": {
+      "comp": [],
+      "enc": [
+        "json"
+      ],
+      "kex": [
+        "x25519"
+      ],
+      "sig": [
+        "ed25519"
+      ],
+      "v": 1
+    },
+    "limits": {
+      "max_array_len": 10000,
+      "max_bytes": 1048576,
+      "max_depth": 64,
+      "max_hops": 8
+    },
+    "modalities": [
+      "text"
+    ],
+    "tools": []
+  },
+  "ct": "task.v1",
+  "from": {
+    "agent_id": "did:key:vector-sender",
+    "instance": "interop",
+    "name": "vector-sender",
+    "role": "planner"
+  },
+  "id": "vector-task-req",
+  "payload": {
+    "acceptance": [
+      "Return one-line status"
+    ],
+    "constraints": {
+      "compute_budget": "low",
+      "safety": {},
+      "time_budget_s": 10
+    },
+    "context": {},
+    "deliverables": [
+      {
+        "description": "status line",
+        "type": "text"
+      }
+    ],
+    "goal": "Return protocol status",
+    "inputs": {
+      "query": "status"
+    },
+    "kind": "task.v1"
+  },
+  "schema": {
+    "embedded": {
+      "properties": {
+        "acceptance": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "constraints": {
+          "properties": {
+            "compute_budget": {
+              "enum": [
+                "low",
+                "med",
+                "high"
+              ]
+            },
+            "safety": {
+              "type": "object"
+            },
+            "time_budget_s": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "time_budget_s",
+            "compute_budget",
+            "safety"
+          ],
+          "type": "object"
+        },
+        "context": {
+          "type": "object"
+        },
+        "deliverables": {
+          "items": {
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "text",
+                  "json",
+                  "file",
+                  "patch"
+                ]
+              }
+            },
+            "required": [
+              "type",
+              "description"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "goal": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "inputs": {
+          "type": "object"
+        },
+        "kind": {
+          "const": "task.v1"
+        }
+      },
+      "required": [
+        "kind",
+        "goal",
+        "inputs",
+        "constraints",
+        "deliverables",
+        "acceptance",
+        "context"
+      ],
+      "type": "object"
+    },
+    "id": "sha256:84bddbab47fbbb7bd7f9122c440db6b922649f47f43e78e9a8e237c624a3d348",
+    "kind": "embedded"
+  },
+  "to": {
+    "agent_id": "did:key:vector-receiver",
+    "instance": "interop",
+    "name": "vector-receiver",
+    "role": "executor"
+  },
+  "ts": "2026-01-01T00:00:00Z",
+  "type": "req",
+  "v": 1
+}

@@ -66,6 +66,7 @@ class SQLiteReplayCache:
         self.max_entries = max_entries
         self.ttl_seconds = ttl_seconds
         self.path = Path(path)
+        created = str(path) != ":memory:" and not self.path.exists()
         if str(path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -83,6 +84,11 @@ class SQLiteReplayCache:
             """
         )
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_created ON replay_nonces(created)")
+        if created:
+            try:
+                self.path.chmod(0o600)
+            except OSError:
+                pass
 
     def close(self) -> None:
         with self._lock:

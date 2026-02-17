@@ -185,6 +185,41 @@ def _run_core_cases(
         mode="dev",
         fn=_case_core_schema_hash_mismatch_rejected,
     )
+    record(
+        case_id="core.valid.session_open_envelope",
+        category="golden",
+        transport="core",
+        mode="dev",
+        fn=_case_core_valid_session_open_envelope,
+    )
+    record(
+        case_id="core.valid.session_open_roundtrip",
+        category="golden",
+        transport="core",
+        mode="dev",
+        fn=_case_core_session_open_roundtrip,
+    )
+    record(
+        case_id="core.invalid.session_nonce_too_short",
+        category="negative",
+        transport="core",
+        mode="dev",
+        fn=_case_core_invalid_session_nonce_rejected,
+    )
+    record(
+        case_id="core.valid.trustsync_discover_roundtrip",
+        category="golden",
+        transport="core",
+        mode="dev",
+        fn=_case_core_trustsync_discover_roundtrip,
+    )
+    record(
+        case_id="core.invalid.trustsync_bad_op",
+        category="negative",
+        transport="core",
+        mode="dev",
+        fn=_case_core_invalid_trustsync_op_rejected,
+    )
 
 
 def _run_http_cases(
@@ -528,6 +563,67 @@ def _case_core_schema_hash_mismatch_rejected() -> str:
     return "schema mismatch rejected"
 
 
+def _case_core_valid_session_open_envelope() -> str:
+    request = _make_session_open_request()
+    validate_envelope(request, allow_schema_uri=False)
+    return "session envelope valid"
+
+
+def _case_core_session_open_roundtrip() -> str:
+    request = _make_session_open_request()
+    response = default_handler(request)
+    validate_envelope(response, allow_schema_uri=False)
+    _assert(response.get("ct") == "session.v1", "expected session.v1 response")
+    payload = response.get("payload")
+    if not isinstance(payload, dict):
+        raise AssertionError("expected session payload object")
+    _assert(payload.get("op") == "ack", "expected session ack")
+    _assert(payload.get("accepted") is True, "expected accepted=true")
+    binding_id = payload.get("binding_id")
+    _assert(isinstance(binding_id, str) and bool(binding_id), "expected binding_id")
+    return "session open handled"
+
+
+def _case_core_invalid_session_nonce_rejected() -> str:
+    request = _make_session_open_request()
+    payload = request.get("payload")
+    if not isinstance(payload, dict):
+        raise AssertionError("payload must be an object")
+    payload["nonce"] = "short"
+    _assert_raises_validation(request)
+    return "short nonce rejected"
+
+
+def _case_core_trustsync_discover_roundtrip() -> str:
+    request = _make_trustsync_discover_request()
+    response = default_handler(request)
+    validate_envelope(response, allow_schema_uri=False)
+    _assert(response.get("ct") == "trustsync.v1", "expected trustsync.v1 response")
+    payload = response.get("payload")
+    if not isinstance(payload, dict):
+        raise AssertionError("expected trustsync payload object")
+    _assert(payload.get("op") == "discover", "expected discover response")
+    _assert(payload.get("status") == "snapshot", "expected snapshot status")
+    _assert(isinstance(payload.get("snapshot"), dict), "expected snapshot object")
+    return "trustsync discover handled"
+
+
+def _case_core_invalid_trustsync_op_rejected() -> str:
+    request = _make_trustsync_discover_request()
+    payload = request.get("payload")
+    if not isinstance(payload, dict):
+        raise AssertionError("payload must be an object")
+    payload["op"] = "invalid-op"
+    response = default_handler(request)
+    validate_envelope(response, allow_schema_uri=False)
+    _assert(response.get("ct") == "error.v1", "expected error.v1 response")
+    error_payload = response.get("payload")
+    if not isinstance(error_payload, dict):
+        raise AssertionError("expected error payload object")
+    _assert(error_payload.get("code") == "BAD_REQUEST", "expected BAD_REQUEST")
+    return "invalid trustsync op rejected"
+
+
 def _assert_raises_validation(envelope: dict[str, Any]) -> None:
     try:
         validate_envelope(envelope, allow_schema_uri=False)
@@ -595,6 +691,64 @@ def _make_task_request(
         content_type="task.v1",
         payload=payload,
         schema=get_builtin_descriptor("task.v1"),
+    )
+
+
+def _make_session_open_request(
+    *,
+    from_agent_id: str = "did:key:conformance-client",
+    to_agent_id: str = "did:key:conformance-server",
+) -> dict[str, Any]:
+    payload = {
+        "op": "open",
+        "profile": {"ct": ["task.v1"], "mode": "enc+sig"},
+        "nonce": "nonce-12345678",
+    }
+    return build_envelope(
+        msg_type="req",
+        from_identity={
+            "agent_id": from_agent_id,
+            "name": "conformance-client",
+            "instance": "suite",
+            "role": "planner",
+        },
+        to_identity={
+            "agent_id": to_agent_id,
+            "name": "conformance-server",
+            "instance": "suite",
+            "role": "executor",
+        },
+        content_type="session.v1",
+        payload=payload,
+        schema=get_builtin_descriptor("session.v1"),
+    )
+
+
+def _make_trustsync_discover_request(
+    *,
+    from_agent_id: str = "did:key:conformance-client",
+    to_agent_id: str = "did:key:conformance-server",
+) -> dict[str, Any]:
+    payload = {
+        "op": "discover",
+    }
+    return build_envelope(
+        msg_type="req",
+        from_identity={
+            "agent_id": from_agent_id,
+            "name": "conformance-client",
+            "instance": "suite",
+            "role": "planner",
+        },
+        to_identity={
+            "agent_id": to_agent_id,
+            "name": "conformance-server",
+            "instance": "suite",
+            "role": "executor",
+        },
+        content_type="trustsync.v1",
+        payload=payload,
+        schema=get_builtin_descriptor("trustsync.v1"),
     )
 
 

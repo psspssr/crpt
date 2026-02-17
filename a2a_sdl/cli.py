@@ -16,6 +16,9 @@ from .conformance import render_conformance_json, render_conformance_text, run_c
 from .envelope import build_envelope, validate_envelope
 from .gateway import GatewayConfig, make_gateway_handler
 from .handlers import HandlerFn, ToolExecutionPolicy, TrustGovernancePolicy, make_default_handler
+from .identity import OIDCVerifier
+from .interoperability import write_interop_vectors
+from .observability import JSONLMetricsExporter
 from .orchestrator import execute_workflow_plan, render_workflow_text
 from .policy import SecurityPolicy, SecurityPolicyManager
 from .schema import get_builtin_descriptor
@@ -31,6 +34,7 @@ from .swarm import BuddyEndpoint, CodexBackend, CodexBuddyServer, SwarmCoordinat
 from .transport_http import AdmissionController, A2AHTTPServer, send_http, send_http_with_auto_downgrade
 from .utils import json_dumps_pretty, new_message_id, sha256_prefixed
 from .versioning import parse_runtime_version_policy
+from .workflow_state import SQLiteWorkflowStateStore
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -107,6 +111,16 @@ def main(argv: list[str] | None = None) -> int:
         "--admin-token",
         help="Optional shared token required for /readyz and /metrics (Authorization: Bearer <token>)",
     )
+    serve.add_argument(
+        "--metrics-export-file",
+        help="Optional JSONL file path for periodic metrics snapshot export.",
+    )
+    serve.add_argument(
+        "--metrics-export-interval-s",
+        type=float,
+        default=15.0,
+        help="Periodic metrics export interval in seconds when --metrics-export-file is set.",
+    )
     serve.add_argument("--secure-required", action="store_true", help="Require enc+sig+replay and authz policy")
     serve.add_argument(
         "--allowed-agent",
@@ -117,6 +131,35 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument(
         "--trusted-signing-keys-file",
         help="JSON object mapping sec.kid -> Ed25519 public key (PEM or b64)",
+    )
+    serve.add_argument("--oidc-required", action="store_true", help="Require valid sec.identity.jwt on inbound requests")
+    serve.add_argument("--oidc-jwks-file", help="JWKS JSON file path used to verify sec.identity.jwt")
+    serve.add_argument("--oidc-issuer", help="Expected OIDC issuer (iss)")
+    serve.add_argument("--oidc-audience", help="Expected OIDC audience (aud)")
+    serve.add_argument(
+        "--oidc-agent-claim",
+        default="sub",
+        help="OIDC claim key that must match from.agent_id (default: sub)",
+    )
+    serve.add_argument(
+        "--oidc-tenant-claim",
+        default="tid",
+        help="OIDC claim key used as tenant identifier (default: tid)",
+    )
+    serve.add_argument(
+        "--tenant-required",
+        action="store_true",
+        help="Require tenant context for inbound requests.",
+    )
+    serve.add_argument(
+        "--tenant-allow",
+        action="append",
+        default=[],
+        help="Allowed tenant identifier (repeatable).",
+    )
+    serve.add_argument(
+        "--agent-tenant-map-file",
+        help="JSON object mapping from.agent_id -> tenant identifier.",
     )
     serve.add_argument(
         "--agent-kid-map-file",
@@ -358,6 +401,35 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="JSON object mapping sec.kid -> Ed25519 public key (PEM or b64)",
     )
+    gateway.add_argument("--oidc-required", action="store_true", help="Require valid sec.identity.jwt on inbound requests")
+    gateway.add_argument("--oidc-jwks-file", help="JWKS JSON file path used to verify sec.identity.jwt")
+    gateway.add_argument("--oidc-issuer", help="Expected OIDC issuer (iss)")
+    gateway.add_argument("--oidc-audience", help="Expected OIDC audience (aud)")
+    gateway.add_argument(
+        "--oidc-agent-claim",
+        default="sub",
+        help="OIDC claim key that must match from.agent_id (default: sub)",
+    )
+    gateway.add_argument(
+        "--oidc-tenant-claim",
+        default="tid",
+        help="OIDC claim key used as tenant identifier (default: tid)",
+    )
+    gateway.add_argument(
+        "--tenant-required",
+        action="store_true",
+        help="Require tenant context for inbound requests.",
+    )
+    gateway.add_argument(
+        "--tenant-allow",
+        action="append",
+        default=[],
+        help="Allowed tenant identifier (repeatable).",
+    )
+    gateway.add_argument(
+        "--agent-tenant-map-file",
+        help="JSON object mapping from.agent_id -> tenant identifier.",
+    )
     gateway.add_argument(
         "--decrypt-keys-file",
         required=True,
@@ -385,17 +457,34 @@ def main(argv: list[str] | None = None) -> int:
     gateway.add_argument("--upstream-timeout", type=float, default=10.0, help="Forwarding timeout in seconds")
     gateway.add_argument("--upstream-retry-attempts", type=int, default=1, help="Forwarding retry attempts")
     gateway.add_argument("--upstream-retry-backoff-s", type=float, default=0.05, help="Forwarding backoff base seconds")
+    gateway.add_argument(
+        "--metrics-export-file",
+        help="Optional JSONL file path for periodic metrics snapshot export.",
+    )
+    gateway.add_argument(
+        "--metrics-export-interval-s",
+        type=float,
+        default=15.0,
+        help="Periodic metrics export interval in seconds when --metrics-export-file is set.",
+    )
     gateway.set_defaults(func=_cmd_gateway)
 
     workflow = subparsers.add_parser("workflow", help="Execute a DAG workflow plan over A2A HTTP endpoints")
-    workflow.add_argument("--plan-file", required=True, help="Workflow plan JSON path")
+    workflow.add_argument("--plan-file", help="Workflow plan JSON path")
     workflow.add_argument("--default-url", help="Default A2A URL for steps that omit url")
     workflow.add_argument("--timeout", type=float, default=10.0, help="Default per-step timeout seconds")
     workflow.add_argument("--retry-attempts", type=int, default=1, help="Default per-step retry attempts")
     workflow.add_argument("--retry-backoff-s", type=float, default=0.05, help="Default per-step backoff base seconds")
     workflow.add_argument("--no-fail-fast", action="store_true", help="Continue scheduling independent steps after failures")
+    workflow.add_argument("--state-db-file", help="SQLite file path for durable workflow run state")
+    workflow.add_argument("--resume-run-id", help="Resume a previously persisted workflow run_id")
     workflow.add_argument("--format", choices=["text", "json"], default="text", help="Output format")
     workflow.set_defaults(func=_cmd_workflow)
+
+    vectors = subparsers.add_parser("vectors", help="Generate canonical interoperability vectors")
+    vectors.add_argument("--out-dir", default="docs/interop-vectors", help="Directory where vectors are written")
+    vectors.add_argument("--verify", action="store_true", help="Validate generated vectors after writing")
+    vectors.set_defaults(func=_cmd_vectors)
 
     args = parser.parse_args(argv)
     return args.func(args)
@@ -435,6 +524,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     effective_secure_required = bool(args.secure_required or prod_mode)
 
     replay_cache: ReplayCache | SQLiteReplayCache | RedisReplayCache | None = None
+    metrics_exporter: JSONLMetricsExporter | None = None
     version_policy = None
     if args.version_policy_file:
         try:
@@ -444,6 +534,18 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             print(f"failed to load version policy: {exc}", file=sys.stderr)
             return 2
 
+    try:
+        oidc_verifier = _load_oidc_verifier(
+            required=bool(args.oidc_required),
+            jwks_file=args.oidc_jwks_file,
+            issuer=args.oidc_issuer,
+            audience=args.oidc_audience,
+        )
+    except Exception as exc:
+        print(f"failed to initialize oidc verifier: {exc}", file=sys.stderr)
+        return 2
+
+    admin_enabled = bool(args.admin_endpoints or args.admin_token)
     secure_policy_enabled = bool(
         effective_secure_required
         or args.trusted_signing_keys_file
@@ -455,6 +557,11 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         or args.kid_not_after_file
         or args.allowed_agent
         or args.session_binding_required
+        or args.oidc_required
+        or args.oidc_jwks_file
+        or args.tenant_required
+        or args.tenant_allow
+        or args.agent_tenant_map_file
     )
 
     effective_replay_protection = bool(args.replay_protection or secure_policy_enabled or prod_mode)
@@ -493,6 +600,10 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             decrypt_private_keys = dict(key_registry.get("decrypt_private_keys", {}))
             if args.decrypt_keys_file:
                 decrypt_private_keys.update(_load_json_map(args.decrypt_keys_file))
+
+            tenant_by_agent = dict(key_registry.get("tenant_by_agent", {}))
+            if args.agent_tenant_map_file:
+                tenant_by_agent.update(_load_json_map(args.agent_tenant_map_file))
         except Exception as exc:
             print(f"failed to load secure policy files: {exc}", file=sys.stderr)
             return 2
@@ -512,6 +623,14 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             )
             return 2
 
+        if secure_policy_enabled and not trusted_signing_keys:
+            print(
+                "secure policy options require trusted signing keys "
+                "(--trusted-signing-keys-file or --key-registry-file)",
+                file=sys.stderr,
+            )
+            return 2
+
         exempt_ct = set(args.session_binding_exempt_ct)
         exempt_ct.update({"session.v1", "error.v1", "negotiation.v1"})
         security_policy = SecurityPolicy(
@@ -527,6 +646,13 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             require_session_binding=bool(args.session_binding_required),
             session_binding_store=session_binding_store,
             session_binding_exempt_ct=exempt_ct,
+            require_tenant=bool(args.tenant_required),
+            allowed_tenants=set(args.tenant_allow),
+            tenant_by_agent=tenant_by_agent,
+            oidc_required=bool(args.oidc_required),
+            oidc_verifier=oidc_verifier,
+            oidc_agent_id_claim=str(args.oidc_agent_claim),
+            oidc_tenant_claim=str(args.oidc_tenant_claim),
         )
 
     trust_policy_manager = SecurityPolicyManager(security_policy) if security_policy is not None else None
@@ -578,6 +704,17 @@ def _cmd_serve(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
+
+    if prod_mode and admin_enabled and not args.admin_token:
+        print(
+            "prod deployment with admin endpoints requires --admin-token",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.metrics_export_file and float(args.metrics_export_interval_s) <= 0:
+        print("--metrics-export-interval-s must be > 0 when --metrics-export-file is set", file=sys.stderr)
+        return 2
 
     audit_chain = None
     if args.audit_log_file:
@@ -647,7 +784,6 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         rate_limit_rps=max(0.0, float(args.admission_rate_rps)),
         burst=max(1, int(args.admission_burst)),
     )
-    admin_enabled = bool(args.admin_endpoints or args.admin_token)
 
     try:
         if effective_replay_protection:
@@ -669,6 +805,14 @@ def _cmd_serve(args: argparse.Namespace) -> int:
         print(f"failed to initialize replay cache: {exc}", file=sys.stderr)
         return 2
 
+    if args.metrics_export_file:
+        try:
+            metrics_exporter = JSONLMetricsExporter(args.metrics_export_file)
+        except Exception as exc:
+            _close_replay_cache(replay_cache)
+            print(f"failed to initialize metrics exporter: {exc}", file=sys.stderr)
+            return 2
+
     try:
         server = A2AHTTPServer(
             args.host,
@@ -686,9 +830,13 @@ def _cmd_serve(args: argparse.Namespace) -> int:
             admin_enabled=admin_enabled,
             admin_token=args.admin_token,
             version_policy=version_policy,
+            metrics_exporter=metrics_exporter,
+            metrics_export_interval_s=max(0.0, float(args.metrics_export_interval_s)),
         )
     except Exception as exc:
         _close_replay_cache(replay_cache)
+        if metrics_exporter is not None:
+            metrics_exporter.close()
         print(f"failed to initialize server: {exc}", file=sys.stderr)
         return 2
     scheme = "https" if args.tls_cert_file and args.tls_key_file else "http"
@@ -868,10 +1016,26 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         )
         return 2
 
+    if args.metrics_export_file and float(args.metrics_export_interval_s) <= 0:
+        print("--metrics-export-interval-s must be > 0 when --metrics-export-file is set", file=sys.stderr)
+        return 2
+
+    try:
+        oidc_verifier = _load_oidc_verifier(
+            required=bool(args.oidc_required),
+            jwks_file=args.oidc_jwks_file,
+            issuer=args.oidc_issuer,
+            audience=args.oidc_audience,
+        )
+    except Exception as exc:
+        print(f"failed to initialize oidc verifier: {exc}", file=sys.stderr)
+        return 2
+
     try:
         trusted_signing_keys = _load_json_map(args.trusted_signing_keys_file)
         decrypt_private_keys = _load_json_map(args.decrypt_keys_file)
         required_kid_by_agent = _load_json_map(args.agent_kid_map_file) if args.agent_kid_map_file else {}
+        tenant_by_agent = _load_json_map(args.agent_tenant_map_file) if args.agent_tenant_map_file else {}
     except Exception as exc:
         print(f"failed to load gateway key material: {exc}", file=sys.stderr)
         return 2
@@ -903,9 +1067,17 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
         require_session_binding=True,
         session_binding_store=session_binding_store,
         session_binding_exempt_ct=exempt_ct,
+        require_tenant=bool(args.tenant_required),
+        allowed_tenants=set(args.tenant_allow),
+        tenant_by_agent=tenant_by_agent,
+        oidc_required=bool(args.oidc_required),
+        oidc_verifier=oidc_verifier,
+        oidc_agent_id_claim=str(args.oidc_agent_claim),
+        oidc_tenant_claim=str(args.oidc_tenant_claim),
     )
 
     replay_cache: ReplayCache | SQLiteReplayCache | RedisReplayCache | None = None
+    metrics_exporter: JSONLMetricsExporter | None = None
     try:
         if args.replay_redis_url:
             replay_cache = RedisReplayCache(
@@ -924,6 +1096,14 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"failed to initialize gateway replay cache: {exc}", file=sys.stderr)
         return 2
+
+    if args.metrics_export_file:
+        try:
+            metrics_exporter = JSONLMetricsExporter(args.metrics_export_file)
+        except Exception as exc:
+            _close_replay_cache(replay_cache)
+            print(f"failed to initialize metrics exporter: {exc}", file=sys.stderr)
+            return 2
 
     gateway_handler = make_gateway_handler(
         config=GatewayConfig(
@@ -947,9 +1127,13 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
             tls_keyfile=args.tls_key_file,
             tls_ca_file=args.tls_ca_file,
             tls_require_client_cert=args.tls_require_client_cert,
+            metrics_exporter=metrics_exporter,
+            metrics_export_interval_s=max(0.0, float(args.metrics_export_interval_s)),
         )
     except Exception as exc:
         _close_replay_cache(replay_cache)
+        if metrics_exporter is not None:
+            metrics_exporter.close()
         print(f"failed to initialize gateway server: {exc}", file=sys.stderr)
         return 2
 
@@ -967,11 +1151,41 @@ def _cmd_gateway(args: argparse.Namespace) -> int:
 
 
 def _cmd_workflow(args: argparse.Namespace) -> int:
+    state_store: SQLiteWorkflowStateStore | None = None
     try:
-        plan = json.loads(pathlib.Path(args.plan_file).read_text(encoding="utf-8"))
+        if args.state_db_file:
+            state_store = SQLiteWorkflowStateStore(args.state_db_file)
     except Exception as exc:
-        print(f"failed to load workflow plan: {exc}", file=sys.stderr)
+        print(f"failed to initialize workflow state store: {exc}", file=sys.stderr)
         return 2
+
+    plan: dict[str, Any]
+    if args.plan_file:
+        try:
+            decoded = json.loads(pathlib.Path(args.plan_file).read_text(encoding="utf-8"))
+        except Exception as exc:
+            if state_store is not None:
+                state_store.close()
+            print(f"failed to load workflow plan: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(decoded, dict):
+            if state_store is not None:
+                state_store.close()
+            print("workflow plan must be a JSON object", file=sys.stderr)
+            return 2
+        plan = decoded
+    else:
+        if not args.resume_run_id or state_store is None:
+            if state_store is not None:
+                state_store.close()
+            print("workflow requires --plan-file, or --resume-run-id with --state-db-file", file=sys.stderr)
+            return 2
+        snapshot = state_store.load_run(run_id=args.resume_run_id)
+        if snapshot is None:
+            state_store.close()
+            print(f"workflow resume run_id not found: {args.resume_run_id}", file=sys.stderr)
+            return 2
+        plan = snapshot.plan
 
     try:
         report = execute_workflow_plan(
@@ -981,8 +1195,12 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             default_retry_attempts=max(0, int(args.retry_attempts)),
             default_retry_backoff_s=max(0.0, float(args.retry_backoff_s)),
             fail_fast=not bool(args.no_fail_fast),
+            state_store=state_store,
+            resume_run_id=args.resume_run_id,
         )
     except Exception as exc:
+        if state_store is not None:
+            state_store.close()
         print(f"workflow execution failed: {exc}", file=sys.stderr)
         return 1
 
@@ -990,7 +1208,31 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         print(json_dumps_pretty(report))
     else:
         print(render_workflow_text(report))
+    if state_store is not None:
+        state_store.close()
     return 0 if report.get("status") == "success" else 1
+
+
+def _cmd_vectors(args: argparse.Namespace) -> int:
+    try:
+        written = write_interop_vectors(args.out_dir)
+    except Exception as exc:
+        print(f"failed to generate interoperability vectors: {exc}", file=sys.stderr)
+        return 2
+
+    if args.verify:
+        try:
+            for path_str in written:
+                raw = json.loads(pathlib.Path(path_str).read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
+                    raise ValueError(f"{path_str} must contain an envelope object")
+                validate_envelope(raw, allow_schema_uri=False)
+        except Exception as exc:
+            print(f"vector verification failed: {exc}", file=sys.stderr)
+            return 1
+
+    print(json_dumps_pretty({"written": written, "count": len(written), "verified": bool(args.verify)}))
+    return 0
 
 
 def _load_payload(payload_file: str | None, payload_json: str | None) -> Any:
@@ -1167,6 +1409,7 @@ def _load_key_registry(path: str) -> dict[str, Any]:
         "trusted_signing_keys": {},
         "required_kid_by_agent": {},
         "allowed_kids_by_agent": {},
+        "tenant_by_agent": {},
         "revoked_kids": set(),
         "kid_not_after": {},
         "decrypt_private_keys": {},
@@ -1193,6 +1436,12 @@ def _load_key_registry(path: str) -> dict[str, Any]:
                 raise ValueError("allowed_kids_by_agent must map to string arrays")
             parsed[str(key)] = set(value)
         registry["allowed_kids_by_agent"] = parsed
+    if "tenant_by_agent" in decoded:
+        if not isinstance(decoded["tenant_by_agent"], dict):
+            raise ValueError("tenant_by_agent must be an object")
+        registry["tenant_by_agent"] = {
+            str(key): str(value) for key, value in decoded["tenant_by_agent"].items()
+        }
     if "revoked_kids" in decoded:
         if not isinstance(decoded["revoked_kids"], list) or not all(isinstance(item, str) for item in decoded["revoked_kids"]):
             raise ValueError("revoked_kids must be a string array")
@@ -1249,6 +1498,24 @@ def _load_key_material(value: str) -> str:
     if path.exists() and path.is_file():
         return path.read_text(encoding="utf-8").strip()
     return value.strip()
+
+
+def _load_oidc_verifier(
+    *,
+    required: bool,
+    jwks_file: str | None,
+    issuer: str | None,
+    audience: str | None,
+) -> OIDCVerifier | None:
+    if required and not jwks_file:
+        raise ValueError("--oidc-required needs --oidc-jwks-file")
+    if not jwks_file:
+        return None
+    return OIDCVerifier.from_jwks_file(
+        jwks_file,
+        issuer=issuer,
+        audience=audience,
+    )
 
 
 def _attach_replay(envelope: dict[str, Any], *, ttl_seconds: int) -> None:

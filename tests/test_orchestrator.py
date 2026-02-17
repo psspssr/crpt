@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from typing import Any
 
 from a2a_sdl.envelope import build_envelope
 from a2a_sdl.orchestrator import execute_workflow_plan
 from a2a_sdl.schema import get_builtin_descriptor
+from a2a_sdl.workflow_state import SQLiteWorkflowStateStore
 
 
 def _task_payload(goal: str) -> dict[str, Any]:
@@ -124,7 +126,71 @@ class OrchestratorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             execute_workflow_plan(plan)
 
+    def test_execute_workflow_plan_persists_and_resumes(self) -> None:
+        plan = {
+            "name": "resume-demo",
+            "steps": [
+                {"id": "step-1", "ct": "task.v1", "payload": _task_payload("one"), "url": "http://example/a2a"},
+                {
+                    "id": "step-2",
+                    "ct": "task.v1",
+                    "payload": _task_payload("two"),
+                    "url": "http://example/a2a",
+                    "depends_on": ["step-1"],
+                },
+                {
+                    "id": "step-3",
+                    "ct": "task.v1",
+                    "payload": _task_payload("three"),
+                    "url": "http://example/a2a",
+                    "depends_on": ["step-2"],
+                },
+            ],
+        }
+
+        def sender_first(url: str, envelope: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            _ = url, kwargs
+            payload = envelope.get("payload")
+            assert isinstance(payload, dict)
+            workflow = payload.get("context", {}).get("workflow", {})
+            assert isinstance(workflow, dict)
+            step_id = workflow["step_id"]
+            if step_id == "step-2":
+                raise RuntimeError("boom")
+            return _ok_response(envelope, step_id=step_id)
+
+        second_calls: list[str] = []
+
+        def sender_second(url: str, envelope: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+            _ = url, kwargs
+            payload = envelope.get("payload")
+            assert isinstance(payload, dict)
+            workflow = payload.get("context", {}).get("workflow", {})
+            assert isinstance(workflow, dict)
+            step_id = workflow["step_id"]
+            second_calls.append(step_id)
+            return _ok_response(envelope, step_id=step_id)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SQLiteWorkflowStateStore(f"{tmpdir}/workflow_state.db")
+            try:
+                report1 = execute_workflow_plan(plan, sender=sender_first, state_store=store)
+                self.assertEqual(report1["status"], "partial")
+                run_id = report1["run_id"]
+
+                report2 = execute_workflow_plan(
+                    plan,
+                    sender=sender_second,
+                    state_store=store,
+                    resume_run_id=run_id,
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(report2["status"], "success")
+        self.assertEqual(report2["resumed_from"], run_id)
+        self.assertEqual(second_calls, ["step-2", "step-3"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

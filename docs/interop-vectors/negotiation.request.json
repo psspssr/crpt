@@ -1,0 +1,101 @@
+{
+  "cap": {
+    "a2a_sdl": {
+      "comp": [],
+      "enc": [
+        "json"
+      ],
+      "kex": [
+        "x25519"
+      ],
+      "sig": [
+        "ed25519"
+      ],
+      "v": 1
+    },
+    "limits": {
+      "max_array_len": 10000,
+      "max_bytes": 1048576,
+      "max_depth": 64,
+      "max_hops": 8
+    },
+    "modalities": [
+      "text"
+    ],
+    "tools": []
+  },
+  "ct": "negotiation.v1",
+  "from": {
+    "agent_id": "did:key:vector-sender",
+    "instance": "interop",
+    "name": "vector-sender",
+    "role": "planner"
+  },
+  "id": "vector-negotiation-req",
+  "payload": {
+    "ask": [
+      "downgrade_ct",
+      "send_embedded_schema"
+    ],
+    "have": {
+      "ct": [
+        "task.v1"
+      ]
+    },
+    "need": {
+      "ct": [
+        "task.v2"
+      ]
+    },
+    "supported_ct": [
+      "task.v1",
+      "negotiation.v1",
+      "error.v1"
+    ]
+  },
+  "schema": {
+    "embedded": {
+      "properties": {
+        "ask": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "have": {
+          "type": "object"
+        },
+        "need": {
+          "type": "object"
+        },
+        "session_binding": {
+          "type": "object"
+        },
+        "supported_ct": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "need",
+        "have",
+        "ask",
+        "supported_ct"
+      ],
+      "type": "object"
+    },
+    "id": "sha256:eb9601582f1259745cf929b937c9a60c8914deea991b716c2b47496c22b21c38",
+    "kind": "embedded"
+  },
+  "to": {
+    "agent_id": "did:key:vector-receiver",
+    "instance": "interop",
+    "name": "vector-receiver",
+    "role": "executor"
+  },
+  "ts": "2026-01-01T00:00:00Z",
+  "type": "req",
+  "v": 1
+}

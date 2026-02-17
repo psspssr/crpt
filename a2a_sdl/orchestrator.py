@@ -10,6 +10,7 @@ from typing import Any, Callable
 from .envelope import build_envelope, validate_envelope
 from .transport_http import send_http
 from .utils import new_message_id
+from .workflow_state import WorkflowRunSnapshot, WorkflowStateStoreProtocol
 
 SenderFn = Callable[..., dict[str, Any]]
 
@@ -23,6 +24,8 @@ def execute_workflow_plan(
     default_retry_backoff_s: float = 0.05,
     fail_fast: bool = True,
     sender: SenderFn | None = None,
+    state_store: WorkflowStateStoreProtocol | None = None,
+    resume_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Execute a workflow plan and return a deterministic run report."""
     if not isinstance(plan, dict):
@@ -53,31 +56,72 @@ def execute_workflow_plan(
                 raise ValueError(f"workflow step {step_id} depends on unknown step {dep}")
 
     order = _topological_order(steps_by_id, deps_by_id)
-    started = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
-    run_id = f"workflow:{new_message_id()}"
+    if resume_run_id is not None and state_store is None:
+        raise ValueError("resume_run_id requires state_store")
+
+    resumed_from: str | None = None
+    restored: WorkflowRunSnapshot | None = None
+    if state_store is not None and isinstance(resume_run_id, str) and resume_run_id:
+        restored = state_store.load_run(run_id=resume_run_id)
+        if restored is None:
+            raise ValueError(f"workflow run not found for resume: {resume_run_id}")
+        resumed_from = resume_run_id
+        if restored.status == "success":
+            return {
+                "run_id": restored.run_id,
+                "name": restored.name,
+                "started_at": restored.started_at,
+                "finished_at": restored.finished_at,
+                "duration_ms": restored.duration_ms,
+                "status": restored.status,
+                "summary": restored.summary,
+                "steps": restored.steps,
+                "resumed_from": resumed_from,
+            }
+
+    now_started = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    started = _parse_iso_utc(restored.started_at) if restored is not None else now_started
+    run_id = restored.run_id if restored is not None else f"workflow:{new_message_id()}"
     send = sender or send_http
-    execution_order: list[str] = []
-    step_results: dict[str, dict[str, Any]] = {}
+    execution_order = list(restored.execution_order) if restored is not None else []
+    step_results = copy.deepcopy(restored.steps) if restored is not None else {}
     halted = False
+
+    if state_store is not None and restored is None:
+        state_store.create_run(
+            run_id=run_id,
+            name=str(plan.get("name", "workflow")),
+            plan=plan,
+            started_at=started.isoformat().replace("+00:00", "Z"),
+        )
 
     for step_id in order:
         step = steps_by_id[step_id]
         deps = deps_by_id[step_id]
+        existing = step_results.get(step_id)
+        if isinstance(existing, dict) and existing.get("status") == "success":
+            continue
         if halted:
-            step_results[step_id] = {
-                "status": "skipped",
-                "depends_on": deps,
-                "reason": "workflow halted",
-            }
+            step_results[step_id] = _with_timestamps(
+                {
+                    "status": "skipped",
+                    "depends_on": deps,
+                    "reason": "workflow halted",
+                }
+            )
+            _save_step(state_store, run_id=run_id, step_id=step_id, result=step_results[step_id], execution_order=execution_order)
             continue
 
         dependency_failures = [dep for dep in deps if step_results.get(dep, {}).get("status") != "success"]
         if dependency_failures:
-            step_results[step_id] = {
-                "status": "skipped",
-                "depends_on": deps,
-                "reason": f"dependency failure: {', '.join(dependency_failures)}",
-            }
+            step_results[step_id] = _with_timestamps(
+                {
+                    "status": "skipped",
+                    "depends_on": deps,
+                    "reason": f"dependency failure: {', '.join(dependency_failures)}",
+                }
+            )
+            _save_step(state_store, run_id=run_id, step_id=step_id, result=step_results[step_id], execution_order=execution_order)
             continue
 
         on_error = step.get("on_error", "fail")
@@ -127,6 +171,8 @@ def execute_workflow_plan(
             }
             if fail_fast and on_error != "continue":
                 halted = True
+        step_results[step_id] = _with_timestamps(step_results[step_id])
+        _save_step(state_store, run_id=run_id, step_id=step_id, result=step_results[step_id], execution_order=execution_order)
 
     finished = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     statuses = [item.get("status") for item in step_results.values()]
@@ -139,7 +185,7 @@ def execute_workflow_plan(
     else:
         workflow_status = "success"
 
-    return {
+    report = {
         "run_id": run_id,
         "name": plan.get("name", "workflow"),
         "started_at": started.isoformat().replace("+00:00", "Z"),
@@ -155,6 +201,19 @@ def execute_workflow_plan(
         },
         "steps": step_results,
     }
+    if resumed_from is not None:
+        report["resumed_from"] = resumed_from
+
+    _finalize_run(
+        state_store,
+        run_id=run_id,
+        status=workflow_status,
+        finished_at=str(report["finished_at"]),
+        duration_ms=int(report["duration_ms"]),
+        summary=report["summary"],
+        execution_order=execution_order,
+    )
+    return report
 
 
 def render_workflow_text(report: dict[str, Any]) -> str:
@@ -293,3 +352,61 @@ def _identity_from_obj(raw: Any, *, default: dict[str, str]) -> dict[str, str]:
             result[key] = default[key]
     return result
 
+
+def _with_timestamps(result: dict[str, Any]) -> dict[str, Any]:
+    out = dict(result)
+    ts = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    out["updated_at"] = ts
+    if "first_seen_at" not in out:
+        out["first_seen_at"] = ts
+    return out
+
+
+def _save_step(
+    state_store: WorkflowStateStoreProtocol | None,
+    *,
+    run_id: str,
+    step_id: str,
+    result: dict[str, Any],
+    execution_order: list[str],
+) -> None:
+    if state_store is None:
+        return
+    state_store.save_step(
+        run_id=run_id,
+        step_id=step_id,
+        result=result,
+        execution_order=execution_order,
+    )
+
+
+def _finalize_run(
+    state_store: WorkflowStateStoreProtocol | None,
+    *,
+    run_id: str,
+    status: str,
+    finished_at: str,
+    duration_ms: int,
+    summary: dict[str, Any],
+    execution_order: list[str],
+) -> None:
+    if state_store is None:
+        return
+    state_store.finalize_run(
+        run_id=run_id,
+        status=status,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
+        summary=summary,
+        execution_order=execution_order,
+    )
+
+
+def _parse_iso_utc(value: str) -> dt.datetime:
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)

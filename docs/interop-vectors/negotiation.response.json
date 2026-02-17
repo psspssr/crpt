@@ -1,0 +1,155 @@
+{
+  "cap": {
+    "a2a_sdl": {
+      "comp": [],
+      "enc": [
+        "json"
+      ],
+      "kex": [
+        "x25519"
+      ],
+      "sig": [
+        "ed25519"
+      ],
+      "v": 1
+    },
+    "limits": {
+      "max_array_len": 10000,
+      "max_bytes": 1048576,
+      "max_depth": 64,
+      "max_hops": 8
+    },
+    "modalities": [
+      "text"
+    ],
+    "tools": [
+      "math.add",
+      "sys.ping"
+    ]
+  },
+  "ct": "negotiation.v1",
+  "from": {
+    "agent_id": "did:key:vector-receiver",
+    "instance": "interop",
+    "name": "vector-receiver",
+    "role": "executor"
+  },
+  "id": "vector-negotiation-res",
+  "payload": {
+    "ask": [],
+    "available_tools": [
+      "math.add",
+      "sys.ping"
+    ],
+    "have": {
+      "a2a_sdl": {
+        "comp": [],
+        "enc": [
+          "json"
+        ],
+        "kex": [
+          "x25519"
+        ],
+        "sig": [
+          "ed25519"
+        ],
+        "v": 1
+      },
+      "limits": {
+        "max_array_len": 10000,
+        "max_bytes": 1048576,
+        "max_depth": 64,
+        "max_hops": 8
+      },
+      "modalities": [
+        "text"
+      ],
+      "tools": []
+    },
+    "need": {},
+    "session_binding": {
+      "alg": "ed25519",
+      "content_type": "session.v1",
+      "supported": false
+    },
+    "supported_ct": [
+      "artifact.v1",
+      "error.v1",
+      "negotiation.v1",
+      "session.v1",
+      "state.v1",
+      "task.v1",
+      "toolcall.v1",
+      "toolresult.v1",
+      "trustsync.v1"
+    ],
+    "versioning": {
+      "migration": {
+        "deprecation_window_days": 90,
+        "requires_migration_metadata_for_breaking_changes": true,
+        "rollback_supported": true
+      },
+      "protocol": {
+        "current": 1,
+        "requires_same_major": true,
+        "supported": [
+          1
+        ]
+      },
+      "runtime_policy": {
+        "supports_content_type_deprecation": true,
+        "supports_content_type_version_ranges": true,
+        "supports_peer_min_max": true
+      },
+      "semver_policy": {
+        "minor_forward_compat": true,
+        "version": "1.0.0"
+      }
+    }
+  },
+  "schema": {
+    "embedded": {
+      "properties": {
+        "ask": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "have": {
+          "type": "object"
+        },
+        "need": {
+          "type": "object"
+        },
+        "session_binding": {
+          "type": "object"
+        },
+        "supported_ct": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "need",
+        "have",
+        "ask",
+        "supported_ct"
+      ],
+      "type": "object"
+    },
+    "id": "sha256:eb9601582f1259745cf929b937c9a60c8914deea991b716c2b47496c22b21c38",
+    "kind": "embedded"
+  },
+  "to": {
+    "agent_id": "did:key:vector-sender",
+    "instance": "interop",
+    "name": "vector-sender",
+    "role": "planner"
+  },
+  "ts": "2026-01-01T00:00:00Z",
+  "type": "res",
+  "v": 1
+}

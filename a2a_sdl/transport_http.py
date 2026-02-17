@@ -30,6 +30,7 @@ from .envelope import (
     make_error_response,
     validate_envelope,
 )
+from .observability import MetricsExporterProtocol
 from .policy import SecurityPolicy, enforce_request_security
 from .replay import ReplayCache, ReplayCacheProtocol
 from .schema import get_builtin_descriptor
@@ -200,6 +201,8 @@ class A2AHTTPServer:
         admin_enabled: bool = False,
         admin_token: str | None = None,
         version_policy: RuntimeVersionPolicy | None = None,
+        metrics_exporter: MetricsExporterProtocol | None = None,
+        metrics_export_interval_s: float = 0.0,
     ) -> None:
         self.host = host
         self.port = port
@@ -215,11 +218,15 @@ class A2AHTTPServer:
         self.admin_enabled = admin_enabled
         self.admin_token = admin_token
         self.version_policy = version_policy
+        self.metrics_exporter = metrics_exporter
+        self.metrics_export_interval_s = max(0.0, float(metrics_export_interval_s))
 
         needs_replay = enforce_replay or bool(security_policy and security_policy.require_replay)
         self.replay_cache = replay_cache or (ReplayCache() if needs_replay else None)
         self._metrics = ServerMetrics()
         self._ready = True
+        self._metrics_export_stop = threading.Event()
+        self._metrics_export_thread: threading.Thread | None = None
         self._validate_tls_config()
         self._server = self._build_server()
         try:
@@ -227,6 +234,7 @@ class A2AHTTPServer:
         except Exception:
             self._server.server_close()
             raise
+        self._start_metrics_export_loop()
 
     def _validate_tls_config(self) -> None:
         has_cert = bool(self.tls_certfile)
@@ -281,7 +289,7 @@ class A2AHTTPServer:
                     self._send_json(payload, status_code=200)
                     return
 
-                if self.path in {"/readyz", "/metrics"} and not self._is_admin_authorized(admin_token):
+                if self.path in {"/readyz", "/metrics", "/metrics.json"} and not self._is_admin_authorized(admin_token):
                     self._send_json({"error": "unauthorized"}, status_code=401)
                     return
 
@@ -301,6 +309,9 @@ class A2AHTTPServer:
                 if self.path == "/metrics":
                     body = metrics.render_prometheus().encode("utf-8")
                     self._send_bytes(body, content_type="text/plain; version=0.0.4", status_code=200)
+                    return
+                if self.path == "/metrics.json":
+                    self._send_json(metrics.snapshot(), status_code=200)
                     return
 
                 self.send_error(404, "Not Found")
@@ -511,8 +522,37 @@ class A2AHTTPServer:
 
     def shutdown(self) -> None:
         self._ready = False
+        self._metrics_export_stop.set()
+        if self._metrics_export_thread is not None:
+            self._metrics_export_thread.join(timeout=1)
+            self._metrics_export_thread = None
+        if self.metrics_exporter is not None:
+            try:
+                self.metrics_exporter.export(self._metrics.snapshot())
+            except Exception:
+                pass
+            try:
+                self.metrics_exporter.close()
+            except Exception:
+                pass
         self._server.shutdown()
         self._server.server_close()
+
+    def _start_metrics_export_loop(self) -> None:
+        exporter = self.metrics_exporter
+        if exporter is None or self.metrics_export_interval_s <= 0:
+            return
+
+        def _run() -> None:
+            while not self._metrics_export_stop.wait(self.metrics_export_interval_s):
+                try:
+                    exporter.export(self._metrics.snapshot())
+                except Exception:
+                    # Metrics export must not impact protocol serving.
+                    continue
+
+        self._metrics_export_thread = threading.Thread(target=_run, daemon=True)
+        self._metrics_export_thread.start()
 
 
 
